@@ -1,0 +1,71 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    restart: always
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: overlay
+      POSTGRES_USER: overlay
+      POSTGRES_PASSWORD: overlay
+    ports: ["5432:5432"]
+    volumes:
+      - ../control_plane/db/schema.sql:/docker-entrypoint-initdb.d/00-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U overlay -d overlay"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: always
+
+  control-plane:
+    build:
+      context: ..
+      dockerfile: control_plane/Dockerfile
+    environment:
+      APP_VERSION: "0.1.0-m1"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: overlay
+      POSTGRES_USER: overlay
+      POSTGRES_PASSWORD: overlay
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    restart: always
+
+  agent-a:
+    build:
+      context: ..
+      dockerfile: agent/Dockerfile
+    environment:
+      NODE_ID: "node-a"
+      AGENT_PORT: 8001
+    depends_on:
+      control-plane:
+        condition: service_started
+    ports:
+      - "8001:8001"
+    restart: always
+
+  agent-b:
+    build:
+      context: ..
+      dockerfile: agent/Dockerfile
+    environment:
+      NODE_ID: "node-b"
+      AGENT_PORT: 8002
+    depends_on:
+      control-plane:
+        condition: service_started
+    ports:
+      - "8002:8002"
+    restart: always
