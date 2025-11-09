@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+
+# Docker
+*.log
+dist/
+build/
+
+# Node (future webui)
+node_modules/
+
+# OS
+.DS_Store

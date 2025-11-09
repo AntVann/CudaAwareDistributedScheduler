@@ -1,0 +1,7 @@
+fastapi==0.115.2
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+redis==5.0.8
+psycopg2-binary==2.9.9
+typer==0.12.5
+requests==2.32.3
