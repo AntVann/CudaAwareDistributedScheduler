@@ -1,6 +1,7 @@
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel
 from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 class JobState(str, Enum):
     QUEUED = "QUEUED"
@@ -18,15 +19,14 @@ class JobSpec(BaseModel):
     cpu: Optional[int] = None
     mem_gb: Optional[float] = None
     priority: int = 0
-    env: Dict[str, str] = {}
-    metadata: Dict[str, Any] = {}
+    env: Dict[str, str] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class JobStatus(BaseModel):
-    job_id: str
     state: JobState
     node_id: Optional[str] = None
-    gpu_ids: List[int] = []
-    timestamps: Dict[str, Optional[float]] = {}
+    gpu_ids: List[int] = Field(default_factory=list)
+    timestamps: Dict[str, Optional[float]] = Field(default_factory=dict)
     exit_code: Optional[int] = None
     reason: Optional[str] = None
 
@@ -40,6 +40,6 @@ class GpuInfo(BaseModel):
 
 class NodeInfo(BaseModel):
     node_id: str
-    gpus: List[GpuInfo] = []
-    labels: Dict[str, str] = {}
-    agent_health: Dict[str, float] = {}
+    gpus: List[GpuInfo] = Field(default_factory=list)
+    labels: Dict[str, str] = Field(default_factory=dict)
+    agent_health: Dict[str, float] = Field(default_factory=dict)
