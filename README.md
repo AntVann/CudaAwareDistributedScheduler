@@ -41,3 +41,12 @@ The `milestone-2` branch introduces the job enqueue/status APIs, bootstrap logic
    - `curl http://localhost:8000/api/policies` (shows active policy and supported list).
 
 Bring everything down with `make down` when finished.
+
+## Milestone 3 Testing
+
+Milestone 3 adds live agent registration and fake GPU heartbeats.
+
+1. `make up` (if not already running).
+2. Wait for the agents to start; they send a heartbeat every ~5 seconds.
+3. `curl http://localhost:8000/api/nodes` — expect both `node-a` and `node-b` with GPU inventories, labels, `agent_health`, and recent `last_seen` timestamps.
+4. Optionally stop one agent (`docker compose stop agent-a`) and watch subsequent responses show only the remaining node.
