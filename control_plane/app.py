@@ -19,7 +19,7 @@ from control_plane.core.persistence import (
 configure_logging()
 logger = logging.getLogger("control_plane")
 
-APP_VERSION = os.getenv("APP_VERSION", "0.2.0-m2")
+APP_VERSION = os.getenv("APP_VERSION", "0.3.0-m3")
 
 app = FastAPI(
     title="CUDA Overlay Control Plane",

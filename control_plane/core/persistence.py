@@ -3,13 +3,13 @@ import logging
 import os
 import pathlib
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 import psycopg2.extras
 import redis
 
-from control_plane.core.models import JobSpec, JobState, JobStatus
+from control_plane.core.models import JobSpec, JobState, JobStatus, NodeInfo
 
 logger = logging.getLogger("control_plane.persistence")
 
@@ -167,3 +167,63 @@ def get_job_status(job_id: str) -> Optional[JobStatus]:
         exit_code=exit_code,
         reason=reason,
     )
+
+
+def upsert_node(node: NodeInfo) -> None:
+    """
+    Insert or update a node heartbeat payload.
+    """
+    if not node.node_id:
+        raise ValueError("node_id is required")
+    serialized_gpus = json.dumps([gpu.model_dump() for gpu in node.gpus])
+    labels_json = json.dumps(node.labels or {})
+    agent_health_json = json.dumps(node.agent_health or {})
+
+    with pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO nodes (node_id, labels, gpus, agent_health, last_seen)
+                VALUES (%s, %s::jsonb, %s::jsonb, %s::jsonb, NOW())
+                ON CONFLICT (node_id) DO UPDATE
+                    SET labels=EXCLUDED.labels,
+                        gpus=EXCLUDED.gpus,
+                        agent_health=EXCLUDED.agent_health,
+                        last_seen=EXCLUDED.last_seen
+                """,
+                (node.node_id, labels_json, serialized_gpus, agent_health_json),
+            )
+
+
+def list_nodes() -> List[NodeInfo]:
+    """
+    Fetch the current known nodes ordered by id.
+    """
+    with pg_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    node_id,
+                    labels,
+                    gpus,
+                    agent_health,
+                    EXTRACT(EPOCH FROM last_seen) AS last_seen
+                FROM nodes
+                ORDER BY node_id
+                """
+            )
+            rows = cur.fetchall()
+
+    nodes: List[NodeInfo] = []
+    for row in rows:
+        nodes.append(
+            NodeInfo(
+                node_id=row["node_id"],
+                labels=row.get("labels") or {},
+                gpus=row.get("gpus") or [],
+                agent_health=row.get("agent_health") or {},
+                last_seen=row.get("last_seen"),
+            )
+        )
+    return nodes

@@ -1,26 +1,34 @@
 import logging
+from typing import List
 
 from fastapi import APIRouter, HTTPException
+
+from control_plane.core.models import NodeInfo
+from control_plane.core.persistence import list_nodes as persist_list_nodes
+from control_plane.core.persistence import upsert_node as persist_upsert_node
 
 router = APIRouter(tags=["nodes"])
 logger = logging.getLogger("control_plane.api.nodes")
 
 
-@router.get("/nodes")
+@router.get("/nodes", response_model=List[NodeInfo])
 def list_nodes():
     """
-    Placeholder list endpoint until Milestone 3 lands.
+    Return the current known nodes and their latest heartbeat payloads.
     """
-    return []
+    return persist_list_nodes()
 
 
-@router.post("/nodes")
-def upsert_node():
+@router.post("/nodes", status_code=202)
+def upsert_node(node: NodeInfo):
     """
-    Placeholder upsert endpoint for heartbeat payloads (Milestone 3).
+    Accept heartbeat payloads from agents. Upserts rows and refreshes last_seen.
     """
-    logger.warning("Node upsert called before implementation")
-    raise HTTPException(
-        status_code=501,
-        detail="Node upsert/list arrives in Milestone 3; not implemented yet.",
-    )
+    try:
+        persist_upsert_node(node)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to upsert node %s", node.node_id)
+        raise HTTPException(status_code=500, detail="Failed to save node heartbeat") from exc
+    return {"ok": True}

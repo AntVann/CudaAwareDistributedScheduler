@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE TABLE IF NOT EXISTS nodes (
   node_id TEXT PRIMARY KEY,
   labels JSONB,
+  gpus JSONB,
+  agent_health JSONB,
   last_seen TIMESTAMP
 );
 
