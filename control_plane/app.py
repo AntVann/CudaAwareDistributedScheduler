@@ -23,7 +23,7 @@ from control_plane.core.persistence import (
 configure_logging()
 logger = logging.getLogger("control_plane")
 
-APP_VERSION = os.getenv("APP_VERSION", "0.4.1-m41")
+APP_VERSION = os.getenv("APP_VERSION", "0.5.0-m5")
 scheduler = NaiveScheduler(loop_secs=1)
 
 app = FastAPI(
