@@ -42,6 +42,14 @@ The `milestone-2` branch introduces the job enqueue/status APIs, bootstrap logic
 
 Bring everything down with `make down` when finished.
 
+### CLI helper
+
+You can poll a job until completion without manual curls using the CLI:
+
+```
+python cli/cli.py watch <job_id>
+```
+
 ## Milestone 3 Testing
 
 Milestone 3 adds live agent registration and fake GPU heartbeats.
