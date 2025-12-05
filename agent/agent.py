@@ -11,16 +11,19 @@ from pydantic import BaseModel
 
 from .loggingConf import configure_logging  # <= NOTE: CamelCase file
 from agent.worker import loop as worker_loop
+from agent.nvml_metrics import sample_gpu_metrics
 
 configure_logging()
 logger = logging.getLogger("agent")
 
 APP_VERSION = os.getenv("APP_VERSION", "0.1.0-m1")
-NODE_ID = os.getenv("NODE_ID", os.uname().nodename)
+_DEFAULT_NODE = os.uname().nodename if hasattr(os, "uname") else platform.node()
+NODE_ID = os.getenv("NODE_ID", _DEFAULT_NODE)
 CONTROL_PLANE_API = os.getenv("CONTROL_PLANE_API", "http://control-plane:8000")
 HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "5"))
 FAKE_GPU_COUNT = int(os.getenv("FAKE_GPU_COUNT", "2"))
 FAKE_GPU_MEM_MB = int(os.getenv("FAKE_GPU_MEM_MB", "24576"))
+GPU_METRICS_MODE = os.getenv("GPU_METRICS_MODE", "auto")  # auto|real|fake
 
 app = FastAPI(
     title=f"CUDA Overlay Agent ({NODE_ID})",
@@ -37,30 +40,13 @@ class RunReq(BaseModel):
     gpu_id: int = 0
 
 
-def _fake_gpu_inventory() -> list[dict]:
-    """
-    Generate deterministic-but-changing fake GPU metrics so UIs have data.
-    """
-    stamp = time()
-    gpus = []
-    for idx in range(FAKE_GPU_COUNT):
-        utilization = ((stamp / (idx + 1)) % 1.0) * 100.0
-        mem_used = int((stamp * (idx + 2)) % FAKE_GPU_MEM_MB)
-        temperature = int(30 + ((stamp + idx * 3) % 40))
-        gpus.append(
-            {
-                "index": idx,
-                "name": f"FakeGPU-{idx}",
-                "mem_total_mb": FAKE_GPU_MEM_MB,
-                "utilization": round(utilization, 2),
-                "mem_used_mb": mem_used,
-                "temperature": temperature,
-            }
-        )
-    return gpus
-
-
 def _heartbeat_payload() -> dict:
+    # Prefer real GPU metrics when available; fall back to fake for non-GPU hosts.
+    gpus = sample_gpu_metrics(
+        mode=GPU_METRICS_MODE,
+        fake_gpu_count=FAKE_GPU_COUNT,
+        fake_gpu_mem_mb=FAKE_GPU_MEM_MB,
+    )
     return {
         "node_id": NODE_ID,
         "labels": {
@@ -68,7 +54,7 @@ def _heartbeat_payload() -> dict:
             "os": platform.system(),
             "app_version": APP_VERSION,
         },
-        "gpus": _fake_gpu_inventory(),
+        "gpus": gpus,
         "agent_health": {"heartbeat_ts": time()},
     }
 

@@ -63,3 +63,20 @@ Milestone 4 adds a naive scheduler loop, admin state transitions, and a fake wor
    - Global queue should shrink after placement: `docker compose -f deploy/docker-compose.yml exec redis redis-cli llen jobs:queue`
    - Per-node assign queue: `docker compose -f deploy/docker-compose.yml exec redis redis-cli lrange assign:node-a 0 -1`
 5. Confirm admin endpoint works directly (optional): `curl -X POST http://localhost:8000/api/admin/jobs/m4-smoke/state -H "Content-Type: application/json" --data "{\"state\":\"RUNNING\"}"`.
+
+## Milestone 4.1 (Local GPU support)
+
+Milestone 4.1 keeps the scheduler/worker but adds real GPU metrics via NVML for hosts with NVIDIA GPUs (e.g., RTX 3070). Jobs still run via the fake executor.
+
+1. Ensure NVIDIA drivers and CUDA are installed on the host; `nvidia-smi` should work.
+2. Start the stack with GPU visibility: `make up`. The agent containers request GPUs (`NVIDIA_VISIBLE_DEVICES=all`); if Docker needs an explicit flag, run `docker compose --compatibility -f deploy/docker-compose.yml up --build -d --gpus all`.
+3. Metrics mode is controlled by `GPU_METRICS_MODE` (default `auto`): set to `real` to require NVML, or `fake` to force synthetic metrics.
+4. Enqueue a job as in Milestone 4 and watch status; heartbeats should now report real GPU names/utilization/temperature from NVML.
+5. Optional: run the agent directly on the host for debugging:
+   ```
+   python -m venv .venv && .\.venv\Scripts\activate
+   pip install -r requirements.txt
+   set CONTROL_PLANE_API=http://localhost:8000
+   set GPU_METRICS_MODE=real
+   uvicorn agent.agent:app --host 0.0.0.0 --port 8001
+   ```
