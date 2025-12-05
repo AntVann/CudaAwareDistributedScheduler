@@ -49,12 +49,19 @@ services:
     environment:
       NODE_ID: "node-a"
       AGENT_PORT: 8001
+      GPU_METRICS_MODE: "auto"
+      NVIDIA_VISIBLE_DEVICES: "all"
     depends_on:
       control-plane:
         condition: service_started
     ports:
       - "8001:8001"
     restart: always
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
 
   agent-b:
     build:
@@ -63,9 +70,16 @@ services:
     environment:
       NODE_ID: "node-b"
       AGENT_PORT: 8002
+      GPU_METRICS_MODE: "auto"
+      NVIDIA_VISIBLE_DEVICES: "all"
     depends_on:
       control-plane:
         condition: service_started
     ports:
       - "8002:8002"
     restart: always
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
