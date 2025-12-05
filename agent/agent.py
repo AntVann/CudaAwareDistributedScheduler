@@ -10,7 +10,6 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from .loggingConf import configure_logging  # <= NOTE: CamelCase file
-from agent.worker import loop as worker_loop
 
 configure_logging()
 logger = logging.getLogger("agent")
@@ -90,7 +89,6 @@ def _send_heartbeat():
 
 _stop_event = threading.Event()
 _hb_thread: Optional[threading.Thread] = None
-_worker_thread: Optional[threading.Thread] = None
 
 
 def _heartbeat_loop():
@@ -109,10 +107,6 @@ def _start_background_tasks():
     if _hb_thread is None or not _hb_thread.is_alive():
         _hb_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
         _hb_thread.start()
-    global _worker_thread  # noqa: PLW0603
-    if _worker_thread is None or not _worker_thread.is_alive():
-        _worker_thread = threading.Thread(target=worker_loop, daemon=True)
-        _worker_thread.start()
 
 
 @app.on_event("shutdown")

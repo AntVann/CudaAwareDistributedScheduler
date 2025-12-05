@@ -1,18 +1,14 @@
 import logging
 import os
-import threading
-import time
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from control_plane.api.admin import router as admin_router
 from control_plane.api.jobs import router as jobs_router
 from control_plane.api.nodes import router as nodes_router
 from control_plane.api.policies import router as policies_router
 from control_plane.loggingConf import configure_logging
-from control_plane.core.scheduler import NaiveScheduler
 from control_plane.core.persistence import (
     bootstrap_storage,
     check_postgres,
@@ -23,8 +19,7 @@ from control_plane.core.persistence import (
 configure_logging()
 logger = logging.getLogger("control_plane")
 
-APP_VERSION = os.getenv("APP_VERSION", "0.4.0-m4")
-scheduler = NaiveScheduler(loop_secs=1)
+APP_VERSION = os.getenv("APP_VERSION", "0.3.0-m3")
 
 app = FastAPI(
     title="CUDA Overlay Control Plane",
@@ -51,7 +46,6 @@ def on_startup():
         logger.error("Storage bootstrap failed: postgres=%s redis=%s", ok_pg, ok_redis)
     else:
         logger.info("Storage bootstrap OK: postgres=%s redis=%s", ok_pg, ok_redis)
-    _start_scheduler_loop()
 
 @app.get("/health")
 def health():
@@ -76,21 +70,6 @@ def ready():
 def root():
     return JSONResponse({"service": "control_plane", "version": APP_VERSION})
 
-def _start_scheduler_loop():
-    """
-    Background scheduler loop that pops from the global queue and places onto per-node queues.
-    """
-    def run_loop():
-        while True:
-            try:
-                scheduler.tick()
-            except Exception:
-                logger.exception("Scheduler tick failed")
-            time.sleep(scheduler.loop_secs)
-
-    threading.Thread(target=run_loop, daemon=True).start()
-
 app.include_router(policies_router, prefix="/api")
 app.include_router(nodes_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")
-app.include_router(admin_router, prefix="/api")
