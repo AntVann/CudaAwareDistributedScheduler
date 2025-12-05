@@ -50,3 +50,14 @@ Milestone 3 adds live agent registration and fake GPU heartbeats.
 2. Wait for the agents to start; they send a heartbeat every ~5 seconds.
 3. `curl http://localhost:8000/api/nodes` — expect both `node-a` and `node-b` with GPU inventories, labels, `agent_health`, and recent `last_seen` timestamps.
 4. Optionally stop one agent (`docker compose stop agent-a`) and watch subsequent responses show only the remaining node.
+
+## Milestone 4 Testing
+
+Milestone 4 introduces the scheduling loop and agent worker so jobs progress from `QUEUED → PLACED → RUNNING → DONE/FAILED`.
+
+1. `make up` to launch Redis, Postgres, the control plane, and both agents.
+2. Enqueue a job (e.g. `curl -X POST http://localhost:8000/api/jobs -H 'Content-Type: application/json' --data '{"job_id":"m4-demo","image":"alpine","cmd":["echo","hello"],"gpus":1}'`).
+3. Watch its lifecycle: `watch -n 2 curl http://localhost:8000/api/jobs/m4-demo` — expect `PLACED` within a second, `RUNNING`, then `DONE`.
+4. View scheduler/worker logs via `make logs` (control plane places jobs, agents claim assignments and execute).
+5. Agents now poll `/api/nodes/{node}/assignments/next`. By default they simulate execution; to run on a host with real GPUs set `EXECUTOR_MODE=force` (or `auto` with `nvidia-smi` available) and `GPU_CAPACITY` to match your device before starting the agent container/process. Submit a GPU workload (e.g. `cmd:["nvidia-smi"]`) and observe the real command running on your RTX-equipped machine.
+6. Jobs always finish even on CPU-only laptops thanks to the simulator; production deploys (Milestones 5+) will replace the mock metrics/executor with NVML/Apptainer integrations.

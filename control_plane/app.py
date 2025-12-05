@@ -15,11 +15,13 @@ from control_plane.core.persistence import (
     check_redis,
     ready_report,
 )
+from control_plane.core.scheduler import Scheduler
 
 configure_logging()
 logger = logging.getLogger("control_plane")
 
-APP_VERSION = os.getenv("APP_VERSION", "0.3.0-m3")
+APP_VERSION = os.getenv("APP_VERSION", "0.4.0-m4")
+_scheduler = Scheduler()
 
 app = FastAPI(
     title="CUDA Overlay Control Plane",
@@ -46,6 +48,13 @@ def on_startup():
         logger.error("Storage bootstrap failed: postgres=%s redis=%s", ok_pg, ok_redis)
     else:
         logger.info("Storage bootstrap OK: postgres=%s redis=%s", ok_pg, ok_redis)
+    _scheduler.start()
+
+
+@app.on_event("shutdown")
+def on_shutdown():
+    logger.info("Stopping scheduler...")
+    _scheduler.stop()
 
 @app.get("/health")
 def health():

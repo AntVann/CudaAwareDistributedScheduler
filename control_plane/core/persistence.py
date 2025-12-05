@@ -16,6 +16,7 @@ logger = logging.getLogger("control_plane.persistence")
 _SCHEMA_PATH = pathlib.Path(__file__).resolve().parents[1] / "db" / "schema.sql"
 _QUEUE_KEY = "jobs:queue"
 _SPEC_KEY_PREFIX = "jobs:spec:"
+_ASSIGN_KEY_PREFIX = "assign:"
 
 
 def pg_conn():
@@ -167,6 +168,106 @@ def get_job_status(job_id: str) -> Optional[JobStatus]:
         exit_code=exit_code,
         reason=reason,
     )
+
+
+def get_job_spec(job_id: str) -> Optional[JobSpec]:
+    r = redis_client()
+    payload = r.get(f"{_SPEC_KEY_PREFIX}{job_id}")
+    if not payload:
+        return None
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        logger.warning("Invalid job spec JSON for %s", job_id)
+        return None
+    return JobSpec(**data)
+
+
+def dequeue_job(timeout: int = 5) -> Optional[str]:
+    r = redis_client()
+    result = r.blpop(_QUEUE_KEY, timeout=timeout)
+    if not result:
+        return None
+    _, job_id = result
+    return job_id
+
+
+def requeue_job(job_id: str) -> None:
+    redis_client().lpush(_QUEUE_KEY, job_id)
+
+
+def assign_job_to_node(node_id: str, job_id: str) -> None:
+    redis_client().rpush(f"{_ASSIGN_KEY_PREFIX}{node_id}", job_id)
+
+
+def pop_assignment_for_node(node_id: str) -> Optional[str]:
+    return redis_client().lpop(f"{_ASSIGN_KEY_PREFIX}{node_id}")
+
+
+def update_job_state(
+    job_id: str,
+    state: JobState,
+    *,
+    node_id: Optional[str] = None,
+    gpu_ids: Optional[List[int]] = None,
+    exit_code: Optional[int] = None,
+    reason: Optional[str] = None,
+) -> JobStatus:
+    """
+    Update job status row and return the new status model.
+    """
+    ts_key = state.value.lower()
+    ts_value = time.time()
+    with pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, node_id, gpu_ids, timestamps, exit_code, reason FROM jobs WHERE job_id = %s",
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"job {job_id} not found")
+            _, current_node_id, current_gpu_ids, timestamps, _, _ = row
+            timestamps = timestamps or {}
+            timestamps[ts_key] = ts_value
+            cur.execute(
+                """
+                UPDATE jobs
+                SET status=%s,
+                    node_id=%s,
+                    gpu_ids=%s,
+                    timestamps=%s::jsonb,
+                    exit_code=%s,
+                    reason=%s
+                WHERE job_id=%s
+                """,
+                (
+                    state.value,
+                    node_id or current_node_id,
+                    list(gpu_ids) if gpu_ids is not None else current_gpu_ids,
+                    json.dumps(timestamps),
+                    exit_code,
+                    reason,
+                    job_id,
+                ),
+            )
+
+    return get_job_status(job_id)
+
+
+def list_active_nodes(ttl_seconds: float = 30.0) -> List[NodeInfo]:
+    """
+    Return nodes with heartbeats fresher than ttl_seconds.
+    """
+    now = time.time()
+    nodes = list_nodes()
+    active = []
+    for node in nodes:
+        if node.last_seen is None:
+            continue
+        if now - node.last_seen <= ttl_seconds:
+            active.append(node)
+    return active
 
 
 def upsert_node(node: NodeInfo) -> None:

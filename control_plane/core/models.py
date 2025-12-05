@@ -44,3 +44,8 @@ class NodeInfo(BaseModel):
     labels: Dict[str, str] = Field(default_factory=dict)
     agent_health: Dict[str, float] = Field(default_factory=dict)
     last_seen: Optional[float] = None
+
+
+class JobAssignment(BaseModel):
+    job_id: str
+    spec: JobSpec
