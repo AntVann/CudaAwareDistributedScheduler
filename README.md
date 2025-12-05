@@ -80,3 +80,18 @@ Milestone 4.1 keeps the scheduler/worker but adds real GPU metrics via NVML for 
    set GPU_METRICS_MODE=real
    uvicorn agent.agent:app --host 0.0.0.0 --port 8001
    ```
+
+## Milestone 5 (Real execution + NVML)
+
+Milestone 5 keeps NVML metrics and switches the worker to run the job command for real (host or Apptainer if `image` is set).
+
+1. Ensure NVIDIA drivers/toolkit are installed; `docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` should work.
+2. Start the stack with GPU access: `docker compose --compatibility -f deploy/docker-compose.yml up --build -d`. The agent will try NVML; set `GPU_METRICS_MODE=real` to require it.
+3. Enqueue a job:
+   ```
+   curl -X POST http://localhost:8000/api/jobs -H "Content-Type: application/json" --data "{\"job_id\":\"m5-smoke\",\"image\":\"\",\"cmd\":[\"nvidia-smi\"]}"
+   ```
+   - If you provide `image`, the worker runs `apptainer exec --nv <image> <cmd>` (ensure Apptainer is installed in the agent container/host).
+   - Without `image`, the command runs on the host.
+4. Poll status: `curl http://localhost:8000/api/jobs/m5-smoke` until you see `DONE` or `FAILED`.
+5. To observe GPU memory/utilization changes, enqueue a heavier command (e.g., a Python script allocating GPU tensors) either on host or inside an Apptainer image.

@@ -6,7 +6,7 @@ import time
 import redis
 import requests
 
-from agent.executor import run_fake
+from agent.executor import run_job
 
 logger = logging.getLogger("agent.worker")
 
@@ -23,7 +23,7 @@ r = redis.Redis(
 
 def loop():
     """
-    Blocking worker loop that pulls assignments and runs them (fake).
+    Blocking worker loop that pulls assignments and runs them.
     """
     logger.info("Starting worker loop; waiting on %s", ASSIGN_Q)
     while True:
@@ -42,7 +42,7 @@ def loop():
                 timeout=5,
             )
 
-            rc = run_fake(job_id, spec.get("cmd", []), spec.get("image"))
+            rc = run_job(spec.get("cmd", []), spec.get("image"), spec.get("env"))
             new_state = "DONE" if rc == 0 else "FAILED"
 
             requests.post(
