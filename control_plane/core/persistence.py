@@ -169,6 +169,31 @@ def get_job_status(job_id: str) -> Optional[JobStatus]:
     )
 
 
+def set_job_state(job_id: str, state: str, exit_code: Optional[int] = None) -> None:
+    """
+    Transition a job to a new state and append timestamp. Used by agents and scheduler.
+    """
+    if not job_id:
+        raise ValueError("job_id is required")
+    if state not in JobState._value2member_map_:  # type: ignore[attr-defined]
+        raise ValueError(f"Invalid state: {state}")
+
+    ts_key = state.lower()
+    ts_value = time.time()
+    with pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE jobs
+                SET status=%s,
+                    exit_code=%s,
+                    timestamps = coalesce(timestamps, '{}'::jsonb) || %s::jsonb
+                WHERE job_id=%s
+                """,
+                (state, exit_code, json.dumps({ts_key: ts_value}), job_id),
+            )
+
+
 def upsert_node(node: NodeInfo) -> None:
     """
     Insert or update a node heartbeat payload.
