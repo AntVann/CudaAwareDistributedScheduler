@@ -1,10 +1,11 @@
 import logging
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from control_plane.core.models import JobSpec, JobStatus
-from control_plane.core.persistence import enqueue_job, get_job_status
+from control_plane.core.persistence import enqueue_job, get_job_status, job_summary, list_jobs
 
 router = APIRouter(tags=["jobs"])
 logger = logging.getLogger("control_plane.api.jobs")
@@ -14,6 +15,24 @@ class EnqueueResponse(BaseModel):
     job_id: str
     created: bool
     status: JobStatus
+
+
+@router.get("/jobs/summary")
+def read_job_summary() -> Dict[str, int]:
+    try:
+        return job_summary()
+    except Exception as exc:
+        logger.exception("Failed to fetch job summary")
+        raise HTTPException(status_code=500, detail="Failed to fetch job summary") from exc
+
+
+@router.get("/jobs")
+def read_jobs() -> List[Dict[str, Any]]:
+    try:
+        return list_jobs()
+    except Exception as exc:
+        logger.exception("Failed to list jobs")
+        raise HTTPException(status_code=500, detail="Failed to list jobs") from exc
 
 
 @router.post("/jobs", response_model=EnqueueResponse)
