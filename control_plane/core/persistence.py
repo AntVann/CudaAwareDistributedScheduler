@@ -18,6 +18,18 @@ _QUEUE_KEY = "jobs:queue"
 _SPEC_KEY_PREFIX = "jobs:spec:"
 
 
+def _job_status_from_row(row: tuple[Any, ...]) -> JobStatus:
+    status, node_id, gpu_ids, timestamps, exit_code, reason = row
+    return JobStatus(
+        state=JobState(status),
+        node_id=node_id,
+        gpu_ids=list(gpu_ids) if gpu_ids else [],
+        timestamps=timestamps or {},
+        exit_code=exit_code,
+        reason=reason,
+    )
+
+
 def pg_conn():
     conn = psycopg2.connect(
         host=os.getenv("POSTGRES_HOST", "postgres"),
@@ -111,7 +123,7 @@ def ready_report() -> Dict[str, Any]:
     }
 
 
-def enqueue_job(spec: JobSpec) -> JobStatus:
+def enqueue_job(spec: JobSpec) -> tuple[JobStatus, bool]:
     if not spec.job_id:
         raise ValueError("job_id is required")
 
@@ -124,7 +136,8 @@ def enqueue_job(spec: JobSpec) -> JobStatus:
                 """
                 INSERT INTO jobs (job_id, spec, status, timestamps)
                 VALUES (%s, %s::jsonb, %s, %s::jsonb)
-                ON CONFLICT (job_id) DO UPDATE SET spec=EXCLUDED.spec
+                ON CONFLICT (job_id) DO NOTHING
+                RETURNING status, node_id, gpu_ids, timestamps, exit_code, reason
                 """,
                 (
                     spec.job_id,
@@ -133,16 +146,35 @@ def enqueue_job(spec: JobSpec) -> JobStatus:
                     json.dumps({"enqueued": enqueued_ts}),
                 ),
             )
+            row = cur.fetchone()
+
+            if row is None:
+                cur.execute(
+                    """
+                    SELECT status, node_id, gpu_ids, timestamps, exit_code, reason
+                    FROM jobs
+                    WHERE job_id = %s
+                    """,
+                    (spec.job_id,),
+                )
+                existing = cur.fetchone()
+                if existing is None:
+                    raise RuntimeError(f"Job {spec.job_id} disappeared after duplicate check")
+                logger.info("Job %s already exists; returning existing status", spec.job_id)
+                return _job_status_from_row(existing), False
 
     r = redis_client()
     r.rpush(_QUEUE_KEY, spec.job_id)
     r.set(f"{_SPEC_KEY_PREFIX}{spec.job_id}", json.dumps(serialized_spec))
 
-    return JobStatus(
-        state=JobState.QUEUED,
-        node_id=None,
-        gpu_ids=[],
-        timestamps={"enqueued": enqueued_ts},
+    return (
+        JobStatus(
+            state=JobState.QUEUED,
+            node_id=None,
+            gpu_ids=[],
+            timestamps={"enqueued": enqueued_ts},
+        ),
+        True,
     )
 
 
@@ -158,18 +190,15 @@ def get_job_status(job_id: str) -> Optional[JobStatus]:
     if not row:
         return None
 
-    status, node_id, gpu_ids, timestamps, exit_code, reason = row
-    return JobStatus(
-        state=JobState(status),
-        node_id=node_id,
-        gpu_ids=list(gpu_ids) if gpu_ids else [],
-        timestamps=timestamps or {},
-        exit_code=exit_code,
-        reason=reason,
-    )
+    return _job_status_from_row(row)
 
 
-def set_job_state(job_id: str, state: str, exit_code: Optional[int] = None) -> None:
+def set_job_state(
+    job_id: str,
+    state: str,
+    exit_code: Optional[int] = None,
+    reason: Optional[str] = None,
+) -> None:
     """
     Transition a job to a new state and append timestamp. Used by agents and scheduler.
     """
@@ -187,11 +216,14 @@ def set_job_state(job_id: str, state: str, exit_code: Optional[int] = None) -> N
                 UPDATE jobs
                 SET status=%s,
                     exit_code=%s,
+                    reason=%s,
                     timestamps = coalesce(timestamps, '{}'::jsonb) || %s::jsonb
                 WHERE job_id=%s
                 """,
-                (state, exit_code, json.dumps({ts_key: ts_value}), job_id),
+                (state, exit_code, reason, json.dumps({ts_key: ts_value}), job_id),
             )
+            if cur.rowcount == 0:
+                raise KeyError(f"Job {job_id} not found")
 
 
 def upsert_node(node: NodeInfo) -> None:

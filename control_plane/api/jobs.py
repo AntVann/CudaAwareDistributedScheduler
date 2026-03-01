@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from control_plane.core.models import JobSpec, JobStatus
@@ -12,14 +12,16 @@ logger = logging.getLogger("control_plane.api.jobs")
 
 class EnqueueResponse(BaseModel):
     job_id: str
+    created: bool
     status: JobStatus
 
 
 @router.post("/jobs", response_model=EnqueueResponse)
-def create_job(spec: JobSpec):
+def create_job(spec: JobSpec, response: Response):
     try:
-        status = enqueue_job(spec)
-        return EnqueueResponse(job_id=spec.job_id, status=status)
+        status, created = enqueue_job(spec)
+        response.status_code = 201 if created else 200
+        return EnqueueResponse(job_id=spec.job_id, created=created, status=status)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 from typing import List
@@ -41,8 +42,14 @@ class NaiveScheduler:
         with pg_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE jobs SET status=%s, node_id=%s WHERE job_id=%s",
-                    ("PLACED", node_id, job_id),
+                    """
+                    UPDATE jobs
+                    SET status=%s,
+                        node_id=%s,
+                        timestamps = coalesce(timestamps, '{}'::jsonb) || %s::jsonb
+                    WHERE job_id=%s
+                    """,
+                    ("PLACED", node_id, json.dumps({"placed": time.time()}), job_id),
                 )
                 conn.commit()
 

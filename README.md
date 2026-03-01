@@ -1,11 +1,12 @@
 # CudaAwareDistributedScheduler
 
-Milestone 5 prototype for a CUDA-aware overlay scheduler with:
+Milestone 6 prototype for a CUDA-aware overlay scheduler with:
 - FastAPI control plane
 - Agent heartbeats + worker loop
 - Redis queue + Postgres state
 - Naive round-robin scheduler
 - Host command execution and optional Apptainer execution path
+- Unit tests, lifecycle integration test, and CI quality gates
 
 ## Prerequisites
 
@@ -99,6 +100,10 @@ python3.12 -m venv .venv
 
 Expected lifecycle is `QUEUED -> PLACED -> RUNNING -> DONE` (or `FAILED`).
 
+Duplicate `job_id` submissions are idempotent:
+- first submission returns `201` with `"created": true`
+- repeated submission returns `200` with `"created": false` and the existing job status
+
 ## Execution Modes
 
 - Host mode: if `image` is empty, worker runs command directly.
@@ -112,6 +117,32 @@ Important:
 - Image mode therefore requires either:
   - a custom agent image with Apptainer installed, or
   - running the agent on a host that already has Apptainer.
+- If image mode is requested without `apptainer` available, the job fails explicitly with exit code `127` and a clear reason.
+
+## Testing and CI
+
+Create a local dev environment:
+```bash
+python3.12 -m venv .venv
+.venv/bin/pip install -r dev-requirements.txt
+```
+
+Run local quality gates:
+```bash
+.venv/bin/python -m compileall -q control_plane agent cli tests
+.venv/bin/python -m ruff check control_plane agent cli tests
+.venv/bin/python -m pytest tests/unit
+```
+
+Run the lifecycle integration test against a live compose stack:
+```bash
+make up
+RUN_INTEGRATION=1 .venv/bin/python -m pytest tests/integration
+```
+
+GitHub Actions:
+- PR and `main` pushes run compile, lint, and unit tests
+- integration test is available through manual workflow dispatch
 
 ## GPU Metrics
 
@@ -156,7 +187,6 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml con
 ## Known Gaps (Current Prototype)
 
 - No auth/authz between services
-- No full CI/lint/test gates yet
 - Scheduler policy selection API exists, but scheduler behavior is currently naive round-robin
 - No SLURM adapter yet (`deploy/slurm/env.sample` is placeholder only)
 
