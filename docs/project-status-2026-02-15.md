@@ -104,24 +104,50 @@ Yes, this is still pending and is likely the next major milestone.
 
 ## Next Milestones (Proposed)
 
-### Milestone 7 - Security + Observability + Policy Execution
-Focus: make the control plane safer and operable for multi-user/multi-node environments.
+### Milestone 7 - Frontend Baseline (Admin UI + Smoke Testing)
+Focus: add a lightweight frontend so the current system can be operated, demonstrated, and smoke-tested without relying only on curl and logs.
+
+Deliverables:
+1. Admin dashboard shell:
+   - frontend app scaffold integrated with the existing control plane
+   - simple local run/build workflow
+2. Jobs UI:
+   - submit a smoke-test job
+   - list recent jobs
+   - view lifecycle state, node assignment, exit code, and failure reason
+3. Nodes UI:
+   - show active nodes, GPU inventory, and last heartbeat
+4. Platform status UI:
+   - show `/health` and `/ready` status
+   - display current queue/job summary data available from backend APIs
+5. Frontend baseline for later milestones:
+   - layout/components that observability and policy controls can extend in later work
+
+Exit criteria:
+- A user can submit and observe a smoke-test job through the UI.
+- A user can inspect node status and platform readiness from the UI.
+- The frontend is usable as the baseline admin page for future observability and policy work.
+
+### Milestone 8 - Security + Observability + Policy Execution
+Focus: make the system safer and more operable for multi-user/multi-node environments, using the frontend baseline from milestone 7.
 
 Deliverables:
 1. Service auth/authz baseline:
-   - Token-based authentication for mutating endpoints (`/api/jobs`, `/api/nodes`, `/api/admin/...`)
+   - token-based authentication for mutating endpoints (`/api/jobs`, `/api/nodes`, `/api/admin/...`)
+   - corresponding admin UI authentication flow or operator token entry
 2. Observability baseline:
-   - Structured metrics for queue depth, placement latency, run duration, success/failure counts
-   - Basic dashboard/logging guidance for local and cluster environments
+   - structured metrics for queue depth, placement latency, run duration, success/failure counts
+   - admin UI panels for those metrics
 3. Scheduler policy implementation:
-   - Implement behavior for declared policies (`FIFO`, `ROUND_ROBIN`, `BINPACK`) instead of static RR
+   - implement behavior for declared policies (`FIFO`, `ROUND_ROBIN`, `BINPACK`) instead of static RR
+   - expose current policy state in the admin UI
 
 Exit criteria:
 - Unauthorized requests are rejected for mutating APIs.
-- Core service metrics are emitted and visible.
-- Policy setting changes scheduler behavior in tests.
+- Core service metrics are emitted and visible in the admin UI.
+- Policy setting changes scheduler behavior in tests and is inspectable from the UI.
 
-### Milestone 8 - SLURM Vertical Slice (School Cluster)
+### Milestone 9 - SLURM Vertical Slice (School Cluster)
 Focus: integrate with HPC scheduler while preserving overlay state model.
 
 Deliverables:
@@ -142,7 +168,7 @@ Exit criteria:
 - Cancellation and failure paths are verified on cluster.
 - Pilot report captures observed timings/failure modes and required fixes.
 
-### Milestone 9 (Optional) - Production Hardening
+### Milestone 10 (Optional) - Production Hardening
 Focus: prepare for sustained multi-user workloads after initial SLURM success.
 
 Deliverables:
