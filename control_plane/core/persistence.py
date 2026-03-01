@@ -252,6 +252,53 @@ def upsert_node(node: NodeInfo) -> None:
             )
 
 
+def list_jobs() -> List[Dict[str, Any]]:
+    """
+    Fetch all jobs ordered by enqueue time descending.
+    Returns flat dicts with {job_id, state, node_id, gpu_ids, timestamps, exit_code, reason}.
+    """
+    with pg_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT job_id, status, node_id, gpu_ids, timestamps, exit_code, reason
+                FROM jobs
+                ORDER BY (timestamps->>'enqueued')::float DESC NULLS LAST
+                """
+            )
+            rows = cur.fetchall()
+
+    result: List[Dict[str, Any]] = []
+    for row in rows:
+        result.append({
+            "job_id": row["job_id"],
+            "state": row["status"],
+            "node_id": row["node_id"],
+            "gpu_ids": list(row["gpu_ids"]) if row["gpu_ids"] else [],
+            "timestamps": row["timestamps"] or {},
+            "exit_code": row["exit_code"],
+            "reason": row["reason"],
+        })
+    return result
+
+
+def job_summary() -> Dict[str, int]:
+    """
+    Return aggregate job counts by state for the dashboard.
+    """
+    with pg_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT status, COUNT(*) AS cnt FROM jobs GROUP BY status")
+            rows = cur.fetchall()
+
+    counts = {s.value.lower(): 0 for s in JobState}
+    for row in rows:
+        key = row["status"].lower()
+        if key in counts:
+            counts[key] = row["cnt"]
+    return counts
+
+
 def list_nodes() -> List[NodeInfo]:
     """
     Fetch the current known nodes ordered by id.
