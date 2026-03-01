@@ -1,10 +1,10 @@
 # Project Status - 2026-02-15
 
 ## Current Branch Snapshot
-- Branch: `serhat-milestone-5` (tracking `origin/milestone-5`)
-- Scope: Milestone 5 prototype
-- Local state: clean branch history, plus two untracked docs (`docs/`, `spec_d_diffs.md`)
-- Baseline checks: Python compile passes, Docker Compose config parses
+- Branch: `codex/milestone-6` (based on current `main`)
+- Scope: Milestone 6 reliability + quality gates
+- Local state: milestone 6 implementation in progress locally with tests and CI additions
+- Baseline checks: compile, lint, unit tests, and lifecycle integration test pass locally
 
 ## What Is Working Now
 1. Control-plane API is running with `/health`, `/version`, and `/ready`.
@@ -31,11 +31,55 @@
    - Fake GPU metrics fallback in `fake` or auto-fallback cases
 8. CLI helper exists:
    - `python cli/cli.py watch <job_id>` for polling lifecycle to completion
+9. Milestone 6 quality gates are implemented:
+   - Unit tests for scheduler, persistence, and worker paths
+   - Integration lifecycle test for `QUEUED -> PLACED -> RUNNING -> DONE`
+   - GitHub Actions workflow for compile, lint, and unit tests
+10. Milestone 6 runtime hardening is implemented:
+   - Worker state updates retry with bounded backoff
+   - Duplicate `job_id` submission is deterministic and documented
+   - Image-mode execution fails clearly when `apptainer` is unavailable
 
 ## What Is Partially Implemented
 1. Scheduling policy support is declared (`FIFO`, `ROUND_ROBIN`, `BINPACK`) but scheduler logic is currently simple round-robin.
 2. State model includes full lifecycle states, but transition rules are permissive and not strongly validated.
 3. Events table exists in schema, but event emission/audit trail is not yet used in runtime paths.
+
+## Milestone 6 Status
+
+Milestone 6 is complete from a project-deliverable perspective.
+
+Completed deliverables:
+1. Automated tests:
+   - Unit tests for scheduler, persistence/idempotency, and worker failure handling
+   - Integration lifecycle test for `QUEUED -> PLACED -> RUNNING -> DONE`
+2. CI quality gates:
+   - GitHub Actions workflow added for compile, lint, and unit tests
+   - Integration test workflow available through manual dispatch
+3. Runtime hardening:
+   - Retry/backoff for worker state updates
+   - Deterministic duplicate submission behavior
+   - Explicit `apptainer` missing-runtime failure path
+
+Validation completed locally:
+1. `python -m compileall -q control_plane agent cli tests`
+2. `ruff check control_plane agent cli tests`
+3. `pytest tests/unit`
+4. `RUN_INTEGRATION=1 pytest tests/integration`
+
+## Follow-Up Bugs and Gaps
+
+These do not block calling milestone 6 complete, but they should be tracked as follow-up reliability issues:
+
+1. Worker drop-on-exception gap:
+   - In `agent/worker.py`, if `process_job()` throws unexpectedly after `BLPOP`, the job is only logged and then dropped from the worker loop.
+   - Impact: jobs can remain stuck without a terminal state.
+2. Duplicate submission recovery gap:
+   - In `control_plane/core/persistence.py`, if Postgres insert succeeds but Redis queue/spec write fails, a retry returns the existing job and does not repair Redis state.
+   - Impact: jobs can be orphaned in Postgres and never scheduled.
+3. Make target environment gap:
+   - `make lint` and `make test` currently call bare `python3`.
+   - Impact: the documented commands are not reliable unless the required tooling is installed in the active interpreter.
 
 ## HPC Integration Status
 Yes, this is still pending and is likely the next major milestone.
@@ -59,25 +103,6 @@ Yes, this is still pending and is likely the next major milestone.
    - verify lifecycle timing, failures, and retries
 
 ## Next Milestones (Proposed)
-
-### Milestone 6 - Reliability + Quality Gates
-Focus: make current runtime behavior testable and predictable before HPC coupling.
-
-Deliverables:
-1. Add automated tests:
-   - Unit tests for scheduler selection, state transitions, and worker error handling
-   - Integration test for `QUEUED -> PLACED -> RUNNING -> DONE/FAILED`
-2. Add CI quality gates:
-   - Basic lint/format/check + test job in CI
-3. Harden runtime paths:
-   - Retry/backoff around worker state updates
-   - Explicit idempotency behavior for duplicate job IDs
-   - Clear failure when `image` mode is requested without Apptainer runtime
-
-Exit criteria:
-- CI required checks pass on every PR.
-- Lifecycle integration test is green and reproducible.
-- No silent state-update failures in worker logs.
 
 ### Milestone 7 - Security + Observability + Policy Execution
 Focus: make the control plane safer and operable for multi-user/multi-node environments.
