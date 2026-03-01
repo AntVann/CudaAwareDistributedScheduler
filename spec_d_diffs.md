@@ -1,0 +1,12 @@
+Spec D — Agent Worker & Execution Lifecycle (Milestone 4)
+
+- Updated status (accurate to repo): The agent currently polls the control-plane HTTP `/api/nodes/{node_id}/assignments/next` instead of consuming `assign:<NODE_ID>` via Redis, and it notifies job start/finish via `/api/jobs/{job_id}/start` and `/finish` without retry/backoff. There is no `/api/admin/jobs/{job_id}/state` endpoint. Execution is simulated when GPUs are absent, but missing specs/commands cause failures rather than a fallback `["echo", job_id]`, and logging is ad hoc rather than structured picked/running/completed entries. No tests exist for the worker lifecycle, integration timing, or soak behavior.
+
+- Worker loop source/queue: Spec calls for `BLPOP assign:<NODE_ID>` on Redis and direct `GET jobs:spec:<job_id>`; current agent polls HTTP `POST /api/nodes/{node_id}/assignments/next` and never touches Redis directly (agent/agent.py:157-193).
+- State updates: Spec wants `POST /api/admin/jobs/{job_id}/state` with `{state, exit_code?}`; code uses `/api/jobs/{job_id}/start` and `/finish` (agent/agent.py:261-301; control_plane/api/jobs.py:36-92). No `/api/admin/.../state` endpoint exists.
+- Error handling for state POST: Spec requires exponential backoff retries; agent posts once and only logs warning (agent/agent.py:261-301).
+- Fake execution stub: Spec’s `run_fake` sleeps ~2s and always returns 0; agent has `_execute_job` that simulates for `SIMULATED_RUN_SECONDS` (default 3s) or runs real subprocess, and it fails when `cmd` missing instead of defaulting to `["echo", job_id]` (agent/agent.py:220-258).
+- Missing job spec fallback: Spec says worker handles missing `jobs:spec:<job_id>` gracefully with fallback cmd; agent assumes spec present in assignment payload and fails if `cmd` empty (agent/agent.py:195-205, 220-231).
+- Logging: Spec requires at least picked/running/completed structured logs with job_id, node_id, exit_code; current logs are ad hoc strings without guaranteed fields and no completion log with exit code (agent/agent.py:201-206, 239-258, 261-301; loggingConf sets JSON formatter but only wraps message text).
+- State machine coverage: QUEUED→PLACED handled in scheduler (control_plane/core/scheduler.py:38-89) and timestamps recorded per update (control_plane/core/persistence.py:116-194), but RUNNING/DONE/FAILED transitions rely on non-spec endpoints above.
+- Testing: Spec calls for unit/integration/soak coverage; tests/ is empty and no worker tests exist.

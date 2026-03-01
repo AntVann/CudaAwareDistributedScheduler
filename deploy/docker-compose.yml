@@ -10,7 +10,6 @@ services:
       POSTGRES_DB: overlay
       POSTGRES_USER: overlay
       POSTGRES_PASSWORD: overlay
-    ports: ["5432:5432"]
     volumes:
       - ../control_plane/db/schema.sql:/docker-entrypoint-initdb.d/00-schema.sql:ro
     healthcheck:
@@ -25,7 +24,7 @@ services:
       context: ..
       dockerfile: control_plane/Dockerfile
     environment:
-      APP_VERSION: "0.2.0-m2"
+      APP_VERSION: "0.5.0-m5"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: overlay
@@ -49,6 +48,8 @@ services:
     environment:
       NODE_ID: "node-a"
       AGENT_PORT: 8001
+      GPU_METRICS_MODE: "auto"
+      NVIDIA_VISIBLE_DEVICES: "all"
     depends_on:
       control-plane:
         condition: service_started
@@ -63,6 +64,8 @@ services:
     environment:
       NODE_ID: "node-b"
       AGENT_PORT: 8002
+      GPU_METRICS_MODE: "auto"
+      NVIDIA_VISIBLE_DEVICES: "all"
     depends_on:
       control-plane:
         condition: service_started
