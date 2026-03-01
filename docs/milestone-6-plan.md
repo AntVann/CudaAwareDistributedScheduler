@@ -1,8 +1,8 @@
 # Milestone 6 Plan: Reliability + Quality Gates
 
-Status: Proposed  
+Status: Completed  
 Date: 2026-02-16  
-Branch baseline: `serhat-milestone-5`
+Branch baseline: `main`
 
 ## Goal
 
@@ -122,10 +122,17 @@ curl -s -X POST http://localhost:8000/api/jobs \
 3. Risk: Behavior changes around duplicate jobs break clients.
    - Mitigation: Document exact API semantics and assert with tests.
 
-## Exit Definition
+## Completion Notes
 
-Milestone 6 is complete when:
-1. CI checks are mandatory and passing on PRs.
-2. Unit and integration tests cover the core lifecycle and pass consistently.
-3. Worker failure handling is explicit (no silent state update failure).
-4. Duplicate submission and image-runtime error behavior are deterministic and documented.
+Completed in the repository:
+1. Unit tests were added for scheduler, persistence/idempotency, and worker state-update paths.
+2. Integration lifecycle coverage was added for `QUEUED -> PLACED -> RUNNING -> DONE`.
+3. CI workflow was added for compile, lint, and unit-test checks, with integration coverage available through manual dispatch.
+4. Worker state updates now retry with bounded backoff and log non-2xx responses explicitly.
+5. Duplicate submission behavior is deterministic and documented.
+6. Image execution failure is explicit when `apptainer` is unavailable.
+
+Known follow-up gaps after milestone completion:
+1. If `process_job()` throws unexpectedly after `BLPOP`, the assignment can still be dropped without a terminal state update.
+2. If Postgres insert succeeds and Redis queue/spec write fails during enqueue, retries do not currently repair Redis state.
+3. `make lint` and `make test` rely on bare `python3`, so they are only reliable when the active interpreter has the dev tooling installed.
