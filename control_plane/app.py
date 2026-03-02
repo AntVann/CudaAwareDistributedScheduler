@@ -8,7 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from control_plane.api.admin import router as admin_router
+from control_plane.api.auth import validate_auth_settings
 from control_plane.api.jobs import router as jobs_router
+from control_plane.api.metrics import router as metrics_router
 from control_plane.api.nodes import router as nodes_router
 from control_plane.api.policies import router as policies_router
 from control_plane.loggingConf import configure_logging
@@ -40,17 +42,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.state.scheduler = scheduler
 
 @app.on_event("startup")
 def on_startup():
     logger.info("Bootstrapping storage (schema + readiness checks)...")
     bootstrap_storage()
+    validate_auth_settings()
     ok_pg = check_postgres()
     ok_redis = check_redis()
     if not (ok_pg and ok_redis):
         logger.error("Storage bootstrap failed: postgres=%s redis=%s", ok_pg, ok_redis)
     else:
         logger.info("Storage bootstrap OK: postgres=%s redis=%s", ok_pg, ok_redis)
+    scheduler.load_active_policy()
     _start_scheduler_loop()
 
 @app.get("/health")
@@ -91,6 +96,7 @@ def _start_scheduler_loop():
     threading.Thread(target=run_loop, daemon=True).start()
 
 app.include_router(policies_router, prefix="/api")
+app.include_router(metrics_router, prefix="/api")
 app.include_router(nodes_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")

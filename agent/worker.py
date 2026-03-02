@@ -14,6 +14,7 @@ logger = logging.getLogger("agent.worker")
 CONTROL_URL = os.getenv("CONTROL_URL", os.getenv("CONTROL_PLANE_API", "http://control-plane:8000"))
 NODE_ID = os.getenv("NODE_ID", "node")
 ASSIGN_Q = f"assign:{NODE_ID}"
+AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "").strip()
 
 r = redis.Redis(
     host=os.getenv("REDIS_HOST", "redis"),
@@ -41,7 +42,7 @@ def _post_state_update(
     delay = STATE_UPDATE_BASE_DELAY
     for attempt in range(1, STATE_UPDATE_ATTEMPTS + 1):
         try:
-            response = requests.post(url, json=payload, timeout=5)
+            response = requests.post(url, json=payload, headers=_auth_headers(), timeout=5)
             if response.ok:
                 return True
             logger.warning(
@@ -69,6 +70,12 @@ def _post_state_update(
 
     logger.error("Giving up on state update for job %s to %s", job_id, state)
     return False
+
+
+def _auth_headers() -> dict[str, str]:
+    if not AGENT_API_TOKEN:
+        return {}
+    return {"Authorization": f"Bearer {AGENT_API_TOKEN}"}
 
 
 def _load_job_spec(job_id: str) -> dict[str, Any]:

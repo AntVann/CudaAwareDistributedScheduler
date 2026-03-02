@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
+import { useOperatorAuth } from "../auth-context";
 import {
   fetchJobs,
   submitJob,
@@ -19,6 +20,7 @@ function truncate(s: string | null | undefined, max = 60): string {
 }
 
 export default function Jobs() {
+  const { token } = useOperatorAuth();
   const [jobs, setJobs] = useState<JobListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -46,12 +48,14 @@ export default function Jobs() {
   }, []);
 
   useEffect(() => {
-    loadJobs();
+    void loadJobs();
   }, [loadJobs]);
 
   useEffect(() => {
     if (autoRefresh) {
-      timerRef.current = setInterval(loadJobs, 3000);
+      timerRef.current = setInterval(() => {
+        void loadJobs();
+      }, 3000);
     }
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
@@ -68,14 +72,14 @@ export default function Jobs() {
         job_id: jobId,
         image: "",
         cmd: parsedCmd,
-      });
+      }, token);
       setSubmitResult({
         msg: res.created
           ? `Created job ${res.job_id} (201)`
           : `Job ${res.job_id} already exists (200)`,
         ok: true,
       });
-      loadJobs();
+      void loadJobs();
     } catch (err) {
       setSubmitResult({
         msg: err instanceof Error ? err.message : "Submit failed",
@@ -113,6 +117,9 @@ export default function Jobs() {
       {showSubmit && (
         <Card>
           <h3 className="text-sm font-medium text-text-secondary mb-3">Submit a Test Job</h3>
+          <p className="mb-3 text-xs text-text-muted">
+            This action requires the operator token stored in the sidebar.
+          </p>
           <div className="flex gap-3 items-end">
             <div className="flex-1">
               <label className="block text-xs text-text-muted mb-1">Command (JSON array)</label>
@@ -125,10 +132,10 @@ export default function Jobs() {
             </div>
             <button
               onClick={handleSubmit}
-              disabled={submitting}
+              disabled={submitting || !token}
               className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50 transition-colors"
             >
-              {submitting ? "Submitting..." : "Submit"}
+              {submitting ? "Submitting..." : token ? "Submit" : "Token Required"}
             </button>
           </div>
           {submitResult && (
@@ -167,9 +174,8 @@ export default function Jobs() {
             </thead>
             <tbody>
               {jobs.map((job) => (
-                <>
+                <Fragment key={job.job_id}>
                   <tr
-                    key={job.job_id}
                     onClick={() => setExpandedId(expandedId === job.job_id ? null : job.job_id)}
                     className="border-b border-border hover:bg-surface-2/50 cursor-pointer transition-colors"
                   >
@@ -191,7 +197,7 @@ export default function Jobs() {
                     </td>
                   </tr>
                   {expandedId === job.job_id && (
-                    <tr key={`${job.job_id}-detail`} className="border-b border-border bg-surface-2/30">
+                    <tr className="border-b border-border bg-surface-2/30">
                       <td colSpan={6} className="px-6 py-4">
                         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
                           <div>
@@ -216,7 +222,7 @@ export default function Jobs() {
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               ))}
             </tbody>
           </table>

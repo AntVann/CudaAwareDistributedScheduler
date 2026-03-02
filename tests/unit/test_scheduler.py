@@ -1,19 +1,20 @@
-import json
-
 from control_plane.core import scheduler as scheduler_module
+from control_plane.core.models import JobSpec, SchedulerPolicy
+from control_plane.core.scheduler import NodeCandidate
 
 
 class FakeRedis:
-    def __init__(self, job_id="job-1"):
-        self.job_id = job_id
+    def __init__(self, job_ids=None):
+        self.job_ids = list(job_ids or ["job-1"])
         self.left_pushes = []
         self.right_pushes = []
         self.counters = {}
 
     def lpop(self, key):
         assert key == "jobs:queue"
-        job_id, self.job_id = self.job_id, None
-        return job_id
+        if not self.job_ids:
+            return None
+        return self.job_ids.pop(0)
 
     def lpush(self, key, value):
         self.left_pushes.append((key, value))
@@ -26,38 +27,6 @@ class FakeRedis:
         self.right_pushes.append((key, value))
 
 
-class FakeCursor:
-    def __init__(self):
-        self.executed = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def execute(self, sql, params):
-        self.executed.append((" ".join(sql.split()), params))
-
-
-class FakeConnection:
-    def __init__(self):
-        self.cursor_obj = FakeCursor()
-        self.commit_called = False
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def cursor(self):
-        return self.cursor_obj
-
-    def commit(self):
-        self.commit_called = True
-
-
 class SchedulerStub(scheduler_module.NaiveScheduler):
     def __init__(self, nodes):
         super().__init__()
@@ -68,31 +37,78 @@ class SchedulerStub(scheduler_module.NaiveScheduler):
         return self.nodes
 
 
-def test_tick_requeues_job_when_no_nodes(monkeypatch):
+def test_tick_requeues_job_when_no_eligible_nodes(monkeypatch):
     fake_redis = FakeRedis()
     monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
-    monkeypatch.setattr(scheduler_module, "pg_conn", lambda: FakeConnection())
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_job_spec",
+        lambda job_id: JobSpec(job_id=job_id, image="", cmd=["echo", "hi"], gpus=2),
+    )
+    place_calls = []
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
 
-    SchedulerStub(nodes=[]).tick()
+    SchedulerStub(nodes=[NodeCandidate(node_id="node-a", gpu_count=1, avg_utilization=0.0)]).tick()
 
     assert fake_redis.left_pushes == [("jobs:queue", "job-1")]
     assert fake_redis.right_pushes == []
+    assert place_calls == []
 
 
-def test_tick_places_job_and_records_placed_timestamp(monkeypatch):
+def test_fifo_selects_first_eligible_node_in_sorted_order(monkeypatch):
     fake_redis = FakeRedis()
-    fake_conn = FakeConnection()
-    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
-    monkeypatch.setattr(scheduler_module, "pg_conn", lambda: fake_conn)
+    scheduler = SchedulerStub(
+        nodes=[
+            NodeCandidate(node_id="node-b", gpu_count=4, avg_utilization=10.0),
+            NodeCandidate(node_id="node-a", gpu_count=3, avg_utilization=20.0),
+            NodeCandidate(node_id="node-c", gpu_count=1, avg_utilization=30.0),
+        ]
+    )
+    scheduler.set_active_policy(SchedulerPolicy.FIFO)
 
-    SchedulerStub(nodes=["node-a", "node-b"]).tick()
+    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_job_spec",
+        lambda job_id: JobSpec(job_id=job_id, image="", cmd=["echo", "hi"], gpus=2),
+    )
+    place_calls = []
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
+
+    scheduler.tick()
 
     assert fake_redis.right_pushes == [("assign:node-a", "job-1")]
-    assert fake_conn.commit_called is True
+    assert place_calls == [("job-1", "node-a")]
 
-    sql, params = fake_conn.cursor_obj.executed[0]
-    assert "UPDATE jobs" in sql
-    assert params[0] == "PLACED"
-    assert params[1] == "node-a"
-    assert json.loads(params[2])["placed"] > 0
-    assert params[3] == "job-1"
+
+def test_round_robin_cycles_across_eligible_nodes():
+    scheduler = scheduler_module.NaiveScheduler()
+    scheduler.set_active_policy(SchedulerPolicy.ROUND_ROBIN)
+    fake_redis = FakeRedis(job_ids=[])
+    spec = JobSpec(job_id="job-1", image="", cmd=["echo"], gpus=1)
+    nodes = [
+        NodeCandidate(node_id="node-b", gpu_count=2, avg_utilization=0.0),
+        NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0),
+    ]
+
+    first = scheduler._select_node(fake_redis, spec, nodes)
+    second = scheduler._select_node(fake_redis, spec, nodes)
+    third = scheduler._select_node(fake_redis, spec, nodes)
+
+    assert (first, second, third) == ("node-a", "node-b", "node-a")
+
+
+def test_binpack_uses_surplus_then_utilization_then_node_id():
+    scheduler = scheduler_module.NaiveScheduler()
+    scheduler.set_active_policy(SchedulerPolicy.BINPACK)
+    fake_redis = FakeRedis(job_ids=[])
+    spec = JobSpec(job_id="job-1", image="", cmd=["echo"], gpus=2)
+    nodes = [
+        NodeCandidate(node_id="node-z", gpu_count=4, avg_utilization=95.0),
+        NodeCandidate(node_id="node-c", gpu_count=3, avg_utilization=40.0),
+        NodeCandidate(node_id="node-b", gpu_count=3, avg_utilization=40.0),
+    ]
+
+    selected = scheduler._select_node(fake_redis, spec, nodes)
+
+    assert selected == "node-b"

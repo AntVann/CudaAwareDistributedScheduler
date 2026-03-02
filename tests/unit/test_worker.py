@@ -31,8 +31,8 @@ def test_post_state_update_retries_until_success(monkeypatch):
         FakeResponse(200, "ok"),
     ]
 
-    def fake_post(url, json, timeout):
-        calls.append((url, json, timeout))
+    def fake_post(url, json, headers, timeout):
+        calls.append((url, json, headers, timeout))
         return responses.pop(0)
 
     monkeypatch.setattr(worker.requests, "post", fake_post)
@@ -47,8 +47,8 @@ def test_post_state_update_handles_request_exception(monkeypatch):
     calls = []
     sleep_calls = []
 
-    def fake_post(url, json, timeout):
-        calls.append((url, json, timeout))
+    def fake_post(url, json, headers, timeout):
+        calls.append((url, json, headers, timeout))
         raise requests.ConnectionError("boom")
 
     monkeypatch.setattr(worker.requests, "post", fake_post)

@@ -24,6 +24,7 @@ HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "5"))
 FAKE_GPU_COUNT = int(os.getenv("FAKE_GPU_COUNT", "2"))
 FAKE_GPU_MEM_MB = int(os.getenv("FAKE_GPU_MEM_MB", "24576"))
 GPU_METRICS_MODE = os.getenv("GPU_METRICS_MODE", "auto")  # auto|real|fake
+AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "").strip()
 
 app = FastAPI(
     title=f"CUDA Overlay Agent ({NODE_ID})",
@@ -64,6 +65,7 @@ def _send_heartbeat():
         resp = requests.post(
             f"{CONTROL_PLANE_API}/api/nodes",
             json=_heartbeat_payload(),
+            headers=_auth_headers(),
             timeout=5,
         )
         if resp.status_code >= 400:
@@ -72,6 +74,12 @@ def _send_heartbeat():
             )
     except Exception as exc:
         logger.warning("Heartbeat failed: %s", exc)
+
+
+def _auth_headers() -> dict[str, str]:
+    if not AGENT_API_TOKEN:
+        return {}
+    return {"Authorization": f"Bearer {AGENT_API_TOKEN}"}
 
 
 _stop_event = threading.Event()

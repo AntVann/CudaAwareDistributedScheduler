@@ -1,8 +1,9 @@
 import logging
 from typing import List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from control_plane.api.auth import require_agent
 from control_plane.core.models import NodeInfo
 from control_plane.core.persistence import list_nodes as persist_list_nodes
 from control_plane.core.persistence import upsert_node as persist_upsert_node
@@ -20,7 +21,7 @@ def list_nodes():
 
 
 @router.post("/nodes", status_code=202)
-def upsert_node(node: NodeInfo):
+def upsert_node(node: NodeInfo, _authorized: None = Depends(require_agent)):
     """
     Accept heartbeat payloads from agents. Upserts rows and refreshes last_seen.
     """

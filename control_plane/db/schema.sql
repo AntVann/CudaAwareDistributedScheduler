@@ -25,3 +25,10 @@ CREATE TABLE IF NOT EXISTS events (
   kind TEXT NOT NULL,
   payload JSONB
 );
+
+CREATE TABLE IF NOT EXISTS scheduler_settings (
+  singleton_key TEXT PRIMARY KEY,
+  active_policy TEXT NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_by TEXT
+);

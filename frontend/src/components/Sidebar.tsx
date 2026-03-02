@@ -1,5 +1,6 @@
 import React from "react";
 import { NavLink } from "react-router-dom";
+import { useOperatorAuth } from "../auth-context";
 
 const links = [
   { to: "/", label: "Dashboard", icon: "grid" },
@@ -27,6 +28,8 @@ const icons: Record<string, React.ReactNode> = {
 };
 
 export default function Sidebar() {
+  const { token, setToken, clearToken } = useOperatorAuth();
+
   return (
     <aside className="w-56 shrink-0 border-r border-border bg-surface-1 flex flex-col">
       <div className="px-5 py-4 border-b border-border">
@@ -54,6 +57,30 @@ export default function Sidebar() {
           </NavLink>
         ))}
       </nav>
+      <div className="border-t border-border px-4 py-4">
+        <label className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-text-muted">
+          Operator Token
+        </label>
+        <input
+          type="password"
+          value={token}
+          onChange={(event) => setToken(event.target.value)}
+          placeholder="Bearer token"
+          className="w-full rounded-md border border-border bg-surface-0 px-3 py-2 text-xs text-text-primary focus:border-accent focus:outline-none"
+        />
+        <div className="mt-2 flex items-center justify-between text-[11px] text-text-muted">
+          <span>{token ? "Stored in session" : "Read-only mode"}</span>
+          {token ? (
+            <button
+              type="button"
+              onClick={clearToken}
+              className="text-accent transition-colors hover:text-accent-hover"
+            >
+              Clear
+            </button>
+          ) : null}
+        </div>
+      </div>
     </aside>
   );
 }

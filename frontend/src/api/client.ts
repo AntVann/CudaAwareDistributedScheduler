@@ -1,7 +1,19 @@
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, init);
+type RequestOptions = RequestInit & {
+  token?: string;
+};
+
+async function request<T>(path: string, init?: RequestOptions): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (init?.token) {
+    headers.set("Authorization", `Bearer ${init.token}`);
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers,
+  });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`${res.status} ${res.statusText}: ${body}`);
@@ -68,9 +80,10 @@ export interface JobSpec {
 
 export const fetchJobs = () => request<JobListItem[]>("/api/jobs");
 export const fetchJobSummary = () => request<JobSummary>("/api/jobs/summary");
-export const submitJob = (spec: JobSpec) =>
+export const submitJob = (spec: JobSpec, token: string) =>
   request<EnqueueResponse>("/api/jobs", {
     method: "POST",
+    token,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(spec),
   });
@@ -94,3 +107,43 @@ export interface NodeInfo {
 }
 
 export const fetchNodes = () => request<NodeInfo[]>("/api/nodes");
+
+// Metrics
+export interface MetricsSummary {
+  queue_depth: number;
+  jobs: JobSummary;
+  nodes: {
+    total: number;
+    fresh: number;
+    stale: number;
+  };
+  latency_ms: {
+    placement_p50: number;
+    placement_p95: number;
+    run_p50: number;
+    run_p95: number;
+  };
+  windowed_terminal_counts: {
+    done: number;
+    failed: number;
+  };
+  window_minutes: number;
+}
+
+export const fetchMetricsSummary = (windowMinutes = 60) =>
+  request<MetricsSummary>(`/api/metrics/summary?window_minutes=${windowMinutes}`);
+
+// Policies
+export interface PoliciesResponse {
+  active: string;
+  supported: string[];
+}
+
+export const fetchPolicies = () => request<PoliciesResponse>("/api/policies");
+export const updateActivePolicy = (policy: string, token: string) =>
+  request<PoliciesResponse>("/api/policies/active", {
+    method: "PUT",
+    token,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ policy }),
+  });
