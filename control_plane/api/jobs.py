@@ -1,9 +1,10 @@
 import logging
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 
+from control_plane.api.auth import require_operator
 from control_plane.core.models import JobSpec, JobStatus
 from control_plane.core.persistence import enqueue_job, get_job_status, job_summary, list_jobs
 
@@ -36,7 +37,11 @@ def read_jobs() -> List[Dict[str, Any]]:
 
 
 @router.post("/jobs", response_model=EnqueueResponse)
-def create_job(spec: JobSpec, response: Response):
+def create_job(
+    spec: JobSpec,
+    response: Response,
+    _authorized: None = Depends(require_operator),
+):
     try:
         status, created = enqueue_job(spec)
         response.status_code = 201 if created else 200

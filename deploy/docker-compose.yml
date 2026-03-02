@@ -24,7 +24,10 @@ services:
       context: ..
       dockerfile: control_plane/Dockerfile
     environment:
-      APP_VERSION: "0.5.0-m5"
+      APP_VERSION: "0.8.0-m8"
+      AUTH_MODE: "token"
+      OPERATOR_API_TOKEN: "local-operator-token"
+      AGENT_API_TOKEN: "local-agent-token"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: overlay
@@ -48,6 +51,7 @@ services:
     environment:
       NODE_ID: "node-a"
       AGENT_PORT: 8001
+      AGENT_API_TOKEN: "local-agent-token"
       GPU_METRICS_MODE: "auto"
       NVIDIA_VISIBLE_DEVICES: "all"
     depends_on:
@@ -64,6 +68,7 @@ services:
     environment:
       NODE_ID: "node-b"
       AGENT_PORT: 8002
+      AGENT_API_TOKEN: "local-agent-token"
       GPU_METRICS_MODE: "auto"
       NVIDIA_VISIBLE_DEVICES: "all"
     depends_on:

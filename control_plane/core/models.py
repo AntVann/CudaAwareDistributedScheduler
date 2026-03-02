@@ -11,6 +11,11 @@ class JobState(str, Enum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
 
+class SchedulerPolicy(str, Enum):
+    FIFO = "FIFO"
+    ROUND_ROBIN = "ROUND_ROBIN"
+    BINPACK = "BINPACK"
+
 class JobSpec(BaseModel):
     job_id: str
     image: str

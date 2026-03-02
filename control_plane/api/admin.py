@@ -1,8 +1,9 @@
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from control_plane.api.auth import require_agent
 from control_plane.core.persistence import set_job_state
 
 router = APIRouter(tags=["admin"])
@@ -16,7 +17,11 @@ class StateReq(BaseModel):
 
 
 @router.post("/admin/jobs/{job_id}/state")
-def set_state(job_id: str, body: StateReq):
+def set_state(
+    job_id: str,
+    body: StateReq,
+    _authorized: None = Depends(require_agent),
+):
     try:
         set_job_state(job_id, body.state, body.exit_code, body.reason)
         return {"ok": True}

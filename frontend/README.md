@@ -1,73 +1,76 @@
-# React + TypeScript + Vite
+# Frontend Admin UI
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React/Vite admin UI for the CudaAwareDistributedScheduler control plane.
 
-Currently, two official plugins are available:
+## Local Development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+Install dependencies:
+```bash
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+Run the Vite dev server:
+```bash
+npm run dev
 ```
+
+By default the UI talks to `http://localhost:8000`. Override with:
+```bash
+VITE_API_BASE=http://localhost:8000 npm run dev
+```
+
+## Auth Flow
+
+Milestone 8 does not add a sign-in screen.
+
+Instead:
+1. Open the UI
+2. Enter the operator token in the sidebar
+3. The token is stored in `sessionStorage`
+4. Only operator-scoped mutating requests attach the bearer token
+
+Local Compose defaults:
+- operator token: `local-operator-token`
+- agent token: `local-agent-token`
+
+Read-only pages remain usable without a token.
+
+## Dashboard
+
+The dashboard polls:
+- `/health`
+- `/ready`
+- `/api/metrics/summary`
+- `/api/policies`
+
+It shows:
+- queue depth
+- current jobs by state
+- fresh vs stale nodes
+- placement and run latency percentiles
+- recent `DONE` and `FAILED` terminal counts
+- active scheduler policy with operator-only update controls
+
+## Jobs Page
+
+The jobs page:
+- lists recent jobs from `GET /api/jobs`
+- supports auto-refresh polling every 3 seconds
+- submits test jobs through `POST /api/jobs`
+
+Submitting a job requires the operator token.
+
+## Nodes Page
+
+The nodes page remains read-only and polls `GET /api/nodes` every 5 seconds.
+
+## Build and Lint
+
+```bash
+npm run lint
+npm run build
+```
+
+Note:
+- the current local Node version may print a Vite warning if it is older than `20.19`
+- the build still succeeds in the current project environment, but upgrading Node removes the warning
