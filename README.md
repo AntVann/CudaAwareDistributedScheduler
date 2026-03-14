@@ -265,6 +265,42 @@ This mode applies `/deploy/docker-compose.gpu.yml` and forces:
 
 On Apple Silicon macOS (M1/M2/M3), this mode is not supported for NVML/CUDA containers.
 
+### SLURM HPC Mode (Phase 3)
+
+Phase 3 adds an HPC-oriented run mode with:
+- `BACKEND=slurm`
+- `DATABASE_URL=sqlite:///...`
+- `QUEUE_BACKEND=memory`
+
+This removes the Redis/Postgres requirement for SLURM deployments while preserving API behavior.
+
+1. Load the sample env:
+```bash
+source deploy/slurm/env.sample
+```
+
+2. Start the control plane:
+```bash
+python -m uvicorn control_plane.app:app --host "$HOST" --port "$PORT"
+```
+
+3. Submit a job:
+```bash
+curl -s -X POST http://localhost:${PORT}/api/jobs \
+  -H "Authorization: Bearer ${OPERATOR_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data '{"job_id":"slurm-smoke-1","image":"","cmd":["echo","hello-from-slurm"],"gpus":1}'
+```
+
+4. Verify backend mapping is present:
+```bash
+curl -s http://localhost:${PORT}/api/jobs
+```
+
+Notes:
+- `CONTROL_PLANE_CALLBACK_URL` must be reachable from compute nodes.
+- Keep `AUTH_MODE=token` for HPC use.
+
 ## Submit and Track a Job
 
 1. Enqueue:
@@ -422,7 +458,7 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml con
 
 - Redis still has no auth or network hardening in the prototype architecture
 - `BINPACK` is inventory-based and heuristic, not reservation-aware
-- No SLURM adapter yet (`deploy/slurm/env.sample` is placeholder only)
+- SLURM mode still needs real-cluster validation and tuning for large active-job counts
 
 ## Troubleshooting
 

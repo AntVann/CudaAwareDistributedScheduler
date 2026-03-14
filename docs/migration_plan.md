@@ -50,7 +50,7 @@ class ExecutionBackend(ABC):
         ...
 
     @abstractmethod
-    def list_nodes(self) -> list[NodeInfo]:
+    def list_nodes(self, recent_secs: int = 30) -> list[NodeInfo]:
         """
         Return the currently available compute nodes with GPU inventory.
         Used by the scheduler to find eligible placement targets.

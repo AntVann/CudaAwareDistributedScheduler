@@ -40,6 +40,7 @@ export const fetchReady = () => request<ReadyResponse>("/ready");
 export interface JobListItem {
   job_id: string;
   state: string;
+  backend_ref: string | null;
   node_id: string | null;
   gpu_ids: number[];
   timestamps: Record<string, number | null>;
