@@ -19,6 +19,16 @@ function truncate(s: string | null | undefined, max = 60): string {
   return s.length > max ? s.slice(0, max) + "..." : s;
 }
 
+const PARTITION_OPTIONS = [
+  { value: "", label: "Auto-select" },
+  { value: "gpuqs", label: "gpuqs - Short GPU (2d)" },
+  { value: "gpuqm", label: "gpuqm - Medium GPU (7d)" },
+  { value: "gpuql", label: "gpuql - Long GPU (14d)" },
+  { value: "nsfqs", label: "nsfqs - NSF Short GPU (2d)" },
+  { value: "nsfqm", label: "nsfqm - NSF Medium GPU (14d)" },
+  { value: "nsfql", label: "nsfql - NSF Long GPU (21d)" },
+];
+
 export default function Jobs() {
   const { token } = useOperatorAuth();
   const [jobs, setJobs] = useState<JobListItem[]>([]);
@@ -30,6 +40,8 @@ export default function Jobs() {
   // Submit form state
   const [showSubmit, setShowSubmit] = useState(false);
   const [cmd, setCmd] = useState('["echo", "hello"]');
+  const [gpus, setGpus] = useState(1);
+  const [partition, setPartition] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState<{ msg: string; ok: boolean } | null>(null);
 
@@ -68,10 +80,16 @@ export default function Jobs() {
     try {
       const parsedCmd: string[] = JSON.parse(cmd);
       const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const metadata: Record<string, unknown> = {};
+      if (partition) {
+        metadata.partition = partition;
+      }
       const res: EnqueueResponse = await submitJob({
         job_id: jobId,
         image: "",
         cmd: parsedCmd,
+        gpus,
+        metadata,
       }, token);
       setSubmitResult({
         msg: res.created
@@ -120,8 +138,8 @@ export default function Jobs() {
           <p className="mb-3 text-xs text-text-muted">
             This action requires the operator token stored in the sidebar.
           </p>
-          <div className="flex gap-3 items-end">
-            <div className="flex-1">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+            <div>
               <label className="block text-xs text-text-muted mb-1">Command (JSON array)</label>
               <input
                 type="text"
@@ -130,6 +148,35 @@ export default function Jobs() {
                 className="w-full rounded-md border border-border bg-surface-0 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent"
               />
             </div>
+            <div className="flex gap-3">
+              <div className="flex-1">
+                <label className="block text-xs text-text-muted mb-1">GPUs</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={16}
+                  value={gpus}
+                  onChange={(e) => setGpus(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="w-full rounded-md border border-border bg-surface-0 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent"
+                />
+              </div>
+              <div className="flex-1">
+                <label className="block text-xs text-text-muted mb-1">Partition</label>
+                <select
+                  value={partition}
+                  onChange={(e) => setPartition(e.target.value)}
+                  className="w-full rounded-md border border-border bg-surface-0 px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent"
+                >
+                  {PARTITION_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
             <button
               onClick={handleSubmit}
               disabled={submitting || !token}
@@ -137,12 +184,12 @@ export default function Jobs() {
             >
               {submitting ? "Submitting..." : token ? "Submit" : "Token Required"}
             </button>
+            {submitResult && (
+              <p className={`text-xs font-mono ${submitResult.ok ? "text-state-done" : "text-state-failed"}`}>
+                {submitResult.msg}
+              </p>
+            )}
           </div>
-          {submitResult && (
-            <p className={`mt-2 text-xs font-mono ${submitResult.ok ? "text-state-done" : "text-state-failed"}`}>
-              {submitResult.msg}
-            </p>
-          )}
         </Card>
       )}
 
@@ -165,6 +212,7 @@ export default function Jobs() {
             <thead>
               <tr className="border-b border-border bg-surface-1 text-left text-xs text-text-muted">
                 <th className="px-4 py-2.5 font-medium">Job ID</th>
+                <th className="px-4 py-2.5 font-medium">SLURM ID</th>
                 <th className="px-4 py-2.5 font-medium">State</th>
                 <th className="px-4 py-2.5 font-medium">Node</th>
                 <th className="px-4 py-2.5 font-medium">Exit Code</th>
@@ -180,6 +228,9 @@ export default function Jobs() {
                     className="border-b border-border hover:bg-surface-2/50 cursor-pointer transition-colors"
                   >
                     <td className="px-4 py-2.5 font-mono text-xs text-accent">{job.job_id}</td>
+                    <td className="px-4 py-2.5 font-mono text-xs text-text-secondary">
+                      {job.backend_ref ? `#${job.backend_ref}` : "-"}
+                    </td>
                     <td className="px-4 py-2.5">
                       <StatusBadge state={job.state} />
                     </td>
@@ -198,7 +249,7 @@ export default function Jobs() {
                   </tr>
                   {expandedId === job.job_id && (
                     <tr className="border-b border-border bg-surface-2/30">
-                      <td colSpan={6} className="px-6 py-4">
+                      <td colSpan={7} className="px-6 py-4">
                         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
                           <div>
                             <span className="text-text-muted">GPU IDs:</span>{" "}
@@ -206,6 +257,12 @@ export default function Jobs() {
                               {job.gpu_ids.length ? job.gpu_ids.join(", ") : "-"}
                             </span>
                           </div>
+                          {job.backend_ref && (
+                            <div>
+                              <span className="text-text-muted">SLURM Job ID:</span>{" "}
+                              <span className="font-mono text-text-secondary">{job.backend_ref}</span>
+                            </div>
+                          )}
                           {Object.entries(job.timestamps).map(([key, val]) => (
                             <div key={key}>
                               <span className="text-text-muted">{key}:</span>{" "}

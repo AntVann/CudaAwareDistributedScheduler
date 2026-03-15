@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   job_id TEXT PRIMARY KEY,
   spec JSONB NOT NULL,
   status TEXT NOT NULL,
+  backend_ref TEXT,
   node_id TEXT,
   gpu_ids INT[],
   timestamps JSONB,
@@ -32,3 +33,5 @@ CREATE TABLE IF NOT EXISTS scheduler_settings (
   updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_by TEXT
 );
+
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS backend_ref TEXT;

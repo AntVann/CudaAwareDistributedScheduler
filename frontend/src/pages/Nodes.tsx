@@ -19,6 +19,17 @@ function freshness(epochSeconds: number | null): string {
   return "bg-state-failed";
 }
 
+function nodeStateBadge(state: string | undefined): { label: string; cls: string } {
+  if (!state) return { label: "unknown", cls: "bg-surface-2 text-text-muted" };
+  const s = state.toLowerCase();
+  if (s === "idle") return { label: "idle", cls: "bg-state-done/15 text-state-done" };
+  if (s === "mixed" || s === "mix") return { label: "mixed", cls: "bg-state-running/15 text-state-running" };
+  if (s.startsWith("alloc")) return { label: "allocated", cls: "bg-accent/15 text-accent" };
+  if (s.startsWith("drain")) return { label: "draining", cls: "bg-state-failed/15 text-state-failed" };
+  if (s === "down" || s === "down*") return { label: "down", cls: "bg-state-failed/15 text-state-failed" };
+  return { label: state, cls: "bg-surface-2 text-text-muted" };
+}
+
 function GpuCard({ gpu }: { gpu: GpuInfo }) {
   const memPct = gpu.mem_total_mb > 0 ? ((gpu.mem_used_mb / gpu.mem_total_mb) * 100).toFixed(0) : 0;
   return (
@@ -34,7 +45,7 @@ function GpuCard({ gpu }: { gpu: GpuInfo }) {
         <div>
           Temp:{" "}
           <span className="font-mono text-text-secondary">
-            {gpu.temperature != null ? `${gpu.temperature}°C` : "-"}
+            {gpu.temperature != null ? `${gpu.temperature}\u00B0C` : "-"}
           </span>
         </div>
         <div className="col-span-2">
@@ -103,40 +114,89 @@ export default function Nodes() {
         </Card>
       ) : (
         <div className="space-y-4">
-          {nodes.map((node) => (
-            <Card key={node.node_id}>
-              <div className="flex items-center gap-3 mb-4">
-                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${freshness(node.last_seen)}`} />
-                <h3 className="font-mono text-sm font-medium text-text-primary">{node.node_id}</h3>
-                <span className="text-xs text-text-muted ml-auto">
-                  Last heartbeat: {relativeTime(node.last_seen)}
-                </span>
-              </div>
+          {nodes.map((node) => {
+            const stateLabel = node.labels?.state;
+            const partitionLabel = node.labels?.partition;
+            const badge = nodeStateBadge(stateLabel);
 
-              {/* GPU inventory */}
-              {node.gpus.length > 0 && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-3">
-                  {node.gpus.map((gpu) => (
-                    <GpuCard key={gpu.index} gpu={gpu} />
-                  ))}
+            return (
+              <Card key={node.node_id}>
+                <div className="flex items-center gap-3 mb-4">
+                  <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${freshness(node.last_seen)}`} />
+                  <h3 className="font-mono text-sm font-medium text-text-primary">{node.node_id}</h3>
+
+                  {/* Node state badge */}
+                  {stateLabel && (
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${badge.cls}`}>
+                      {badge.label}
+                    </span>
+                  )}
+
+                  <span className="text-xs text-text-muted ml-auto">
+                    Last heartbeat: {relativeTime(node.last_seen)}
+                  </span>
                 </div>
-              )}
 
-              {/* Agent health */}
-              {Object.keys(node.agent_health).length > 0 && (
-                <div className="border-t border-border pt-3 mt-3">
-                  <p className="text-xs text-text-muted mb-1">Agent Health</p>
-                  <div className="flex flex-wrap gap-3">
-                    {Object.entries(node.agent_health).map(([key, val]) => (
-                      <span key={key} className="text-xs font-mono text-text-secondary">
-                        {key}: {typeof val === "number" ? val.toFixed(2) : String(val)}
+                {/* Partition & labels */}
+                {partitionLabel && (
+                  <div className="flex flex-wrap gap-2 mb-3">
+                    {partitionLabel.split(",").map((p) => (
+                      <span
+                        key={p}
+                        className="rounded-md bg-surface-2 px-2 py-0.5 text-xs font-mono text-text-secondary"
+                      >
+                        {p.trim()}
                       </span>
                     ))}
                   </div>
-                </div>
-              )}
-            </Card>
-          ))}
+                )}
+
+                {/* GPU inventory */}
+                {(() => {
+                  const hasRealMetrics = node.gpus.length > 0 &&
+                    node.gpus.some((g) => g.name !== "unknown" || g.mem_total_mb > 0 || g.utilization > 0);
+
+                  if (node.gpus.length > 0 && hasRealMetrics) {
+                    return (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-3">
+                        {node.gpus.map((gpu) => (
+                          <GpuCard key={gpu.index} gpu={gpu} />
+                        ))}
+                      </div>
+                    );
+                  }
+
+                  if (node.gpus.length > 0) {
+                    return (
+                      <p className="text-xs text-text-muted mb-3">
+                        {node.gpus.length} GPU{node.gpus.length !== 1 ? "s" : ""} available (detailed metrics not reported)
+                      </p>
+                    );
+                  }
+
+                  if (stateLabel) {
+                    return <p className="text-xs text-text-muted mb-3">No GPU details available</p>;
+                  }
+
+                  return null;
+                })()}
+
+                {/* Agent health */}
+                {Object.keys(node.agent_health).length > 0 && (
+                  <div className="border-t border-border pt-3 mt-3">
+                    <p className="text-xs text-text-muted mb-1">Agent Health</p>
+                    <div className="flex flex-wrap gap-3">
+                      {Object.entries(node.agent_health).map(([key, val]) => (
+                        <span key={key} className="text-xs font-mono text-text-secondary">
+                          {key}: {typeof val === "number" ? val.toFixed(2) : String(val)}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </Card>
+            );
+          })}
         </div>
       )}
     </div>

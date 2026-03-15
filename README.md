@@ -1,49 +1,169 @@
 # CudaAwareDistributedScheduler
 
-Milestone 8 prototype for a CUDA-aware overlay scheduler with:
-- FastAPI control plane
-- Agent heartbeats + worker loop
-- Redis queue + Postgres state
-- Runtime-selectable `FIFO`, `ROUND_ROBIN`, and inventory-based `BINPACK` scheduler policies
-- Host command execution and optional Apptainer execution path
-- Token auth for control-plane mutations
-- React/Vite admin UI with metrics and policy controls
-- Unit tests, lifecycle integration test, and CI quality gates
+A GPU-aware job scheduler that runs on top of SLURM. It provides a REST API and web dashboard for submitting, tracking, and managing GPU workloads on HPC clusters.
 
-## Prerequisites
+**Key features:**
+- FastAPI control plane with SLURM backend (sbatch/sacct/sinfo/scancel)
+- SQLite persistence (no Postgres/Redis required on HPC)
+- Runtime-selectable scheduling policies: `FIFO`, `ROUND_ROBIN`, `BINPACK`
+- Background poller that tracks SLURM job state transitions
+- React/Vite admin dashboard with real-time job and node views
+- Also runs locally via Docker Compose with Redis + Postgres for development
 
-Required:
+## Architecture
+
+```
+  Browser (React UI)
+       |
+  FastAPI Control Plane   <-- REST API
+       |
+  ExecutionBackend (ABC)
+       |
+  +----+----+
+  |         |
+SLURM    Redis+Agent
+(HPC)    (Local Dev)
+```
+
+The `ExecutionBackend` abstraction allows the same API to work against SLURM on HPC or Redis+Agent workers in Docker for local development.
+
+## Project Structure
+
+```
+control_plane/          # FastAPI backend
+  core/
+    backend.py          # ExecutionBackend ABC
+    backends/
+      slurm.py          # SLURM backend (sbatch, sacct, sinfo, scancel)
+      redis_agent.py    # Redis+Agent backend for local dev
+    scheduler.py        # Job placement logic (FIFO, ROUND_ROBIN, BINPACK)
+    persistence.py      # Dual-path: Postgres or SQLite
+    models.py           # JobSpec, JobStatus, NodeInfo, etc.
+  api/                  # REST endpoints (jobs, nodes, metrics, policies)
+  db/schema.sql         # Postgres schema
+frontend/               # React/Vite admin dashboard
+agent/                  # Worker agent (local dev mode only)
+deploy/                 # Docker Compose files
+docs/                   # Design documents and reports
+tests/                  # Unit and integration tests
+```
+
+## Quick Start: HPC Deployment (SLURM)
+
+This is the primary deployment mode, running on an HPC cluster with SLURM.
+
+### Prerequisites
+
+- Access to a SLURM HPC cluster (tested on SJSU coe-hpc1/coe-hpc3)
+- Python 3.10+ available via `module load`
+- SLURM commands available: `sbatch`, `sacct`, `sinfo`, `scancel`, `squeue`
+
+### 1. Transfer the project to HPC
+
+From your local machine:
+```bash
+rsync -avz \
+  --exclude='.venv' --exclude='node_modules' --exclude='.git' \
+  --exclude='__pycache__' --exclude='frontend/dist' --exclude='*.pyc' \
+  ~/Projects/CudaAwareDistributedScheduler <your-id>@<hpc-login-node>:~/
+```
+
+### 2. Set up Python environment on HPC
+
+```bash
+# SSH into the HPC login node
+module load python3/3.11.5    # or whichever 3.10+ is available
+cd ~/CudaAwareDistributedScheduler
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install fastapi uvicorn pydantic
+```
+
+### 3. Start the control plane
+
+```bash
+export BACKEND=slurm
+export DATABASE_URL="sqlite:////home/<your-id>/scheduler.db"
+export OPERATOR_TOKEN="demo-token-123"
+export SLURM_POLL_INTERVAL_SECS=10
+
+cd ~/CudaAwareDistributedScheduler
+python -m uvicorn control_plane.app:app --host 0.0.0.0 --port 8000
+```
+
+You should see:
+```
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000
+```
+
+### 4. Submit a test job
+
+From a second terminal on the cluster:
+```bash
+curl -X POST http://<login-node>:8000/api/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "job_id": "test-001",
+    "image": "",
+    "cmd": ["nvidia-smi"],
+    "gpus": 1,
+    "metadata": {"partition": "gpuqs"}
+  }'
+```
+
+Check job status:
+```bash
+curl http://<login-node>:8000/api/jobs | python3 -m json.tool
+```
+
+Check SLURM queue:
+```bash
+squeue -u <your-id>
+```
+
+### 5. View the dashboard from your local machine
+
+Set up an SSH tunnel from your local machine:
+```bash
+ssh -L 8000:<login-node>:8000 <your-id>@<hpc-login-node>
+```
+
+Then start the frontend locally:
+```bash
+cd frontend
+npm install
+echo 'VITE_API_BASE=http://localhost:8000' > .env
+npm run dev
+```
+
+Open `http://localhost:5173` in your browser to see the dashboard.
+
+### Environment Variables (SLURM mode)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BACKEND` | `redis-agent` | Set to `slurm` for HPC mode |
+| `DATABASE_URL` | — | `sqlite:///path/to/scheduler.db` |
+| `SLURM_POLL_INTERVAL_SECS` | `15` | How often to poll sacct for job updates |
+| `SLURM_DEFAULT_PARTITION` | `gpu` | Default SLURM partition if not specified in job |
+| `SLURM_LOG_DIR` | `/tmp/scheduler-logs` | Where SLURM stdout/stderr logs go |
+| `SLURM_SCRIPT_DIR` | `/tmp/scheduler-scripts` | Where generated sbatch scripts are stored |
+| `CONTROL_PLANE_CALLBACK_URL` | `http://127.0.0.1:8000` | URL compute nodes use to call back to the control plane |
+| `AGENT_API_TOKEN` | — | Token for agent-scope auth on callbacks |
+| `OPERATOR_TOKEN` | — | Token for operator-scope auth |
+
+## Quick Start: Local Development (Docker)
+
+For local development and testing without an HPC cluster.
+
+### Prerequisites
+
 - Docker Engine/Desktop running
 - Docker Compose v2 (`docker compose`)
 - `make`
-- `curl`
-
-Optional:
-- Python 3.11+ (for local CLI usage)
-- NVIDIA driver + container toolkit (if you want real GPU metrics in containers)
-
-## Services and Ports
-
-- Control plane: `http://localhost:8000`
-- Agent A: `http://localhost:8001`
-- Agent B: `http://localhost:8002`
-- Redis: `localhost:6379`
-- Postgres: internal to Docker network (`postgres:5432`, not published on host)
-
-## Demo Walkthrough
-
-This is the recommended end-to-end local demo flow for the current Milestone 8 system.
-
-What this demo shows:
-- control plane readiness
-- authenticated operator actions
-- agent heartbeats
-- job submission and lifecycle tracking
-- metrics summary updates
-- runtime scheduler policy changes
-
-What this demo does not show yet:
-- SLURM or Milestone 9 HPC integration
+- Node.js (for frontend)
 
 ### 1. Start the stack
 
@@ -51,39 +171,16 @@ What this demo does not show yet:
 make up
 ```
 
-Optional:
-```bash
-make logs
-```
+This starts the control plane, two agent workers, Redis, and Postgres.
 
-### 2. Use the local demo tokens
-
-The local Compose setup already configures these values:
-- operator token: `local-operator-token`
-- agent token: `local-agent-token`
-
-For the demo, the main one you will use manually is:
-```bash
-local-operator-token
-```
-
-### 3. Verify the platform is healthy
+### 2. Verify health
 
 ```bash
-curl -s http://localhost:8000/health
-curl -s http://localhost:8000/version
-curl -s http://localhost:8000/ready
-curl -s http://localhost:8000/api/nodes
+curl http://localhost:8000/health
+curl http://localhost:8000/api/nodes
 ```
 
-Expected:
-- `/health` returns `ok: true`
-- `/ready` shows both Postgres and Redis as healthy
-- `/api/nodes` shows active nodes heartbeating
-
-### 4. Open the admin UI
-
-Start the frontend in a separate terminal:
+### 3. Start the frontend
 
 ```bash
 cd frontend
@@ -91,350 +188,118 @@ npm install
 npm run dev
 ```
 
-Then open:
-```text
-http://localhost:5173
-```
+Open `http://localhost:5173` in your browser.
 
-In the sidebar:
-- enter `local-operator-token` into the operator token field
+### 4. Submit a job
 
-### 5. Show the dashboard
-
-UI path:
-- `Admin UI -> Dashboard`
-
-From the UI, show:
-- health and readiness cards
-- queue depth
-- current job counts
-- fresh vs stale node counts
-- latency summary
-- active scheduling policy
-
-Or do an optional API check:
+From the UI, click **Submit Test Job**, or via API:
 ```bash
-# Current operator-facing metrics snapshot: queue depth, node freshness,
-# latency percentiles, and recent terminal job counts.
-curl -s "http://localhost:8000/api/metrics/summary?window_minutes=60"
-
-# Current active scheduler policy and the list of supported policies.
-curl -s http://localhost:8000/api/policies
+curl -X POST http://localhost:8000/api/jobs \
+  -H "Authorization: Bearer local-operator-token" \
+  -H "Content-Type: application/json" \
+  -d '{"job_id":"demo-1","image":"","cmd":["echo","hello"]}'
 ```
 
-### 6. Submit a smoke-test job
+Watch the job move through `QUEUED -> PLACED -> RUNNING -> DONE` in the Jobs page.
 
-UI path:
-- `Admin UI -> Jobs -> Submit Test Job`
+### 5. Change scheduler policy
 
-From the UI:
-- go to `Jobs`
-- click `Submit Test Job`
-- keep the default command or use:
+On the Dashboard page, switch between `FIFO`, `ROUND_ROBIN`, and `BINPACK`.
+
+### 6. Stop
+
+```bash
+make down
+```
+
+### Services and Ports (Docker mode)
+
+| Service | Port |
+|---------|------|
+| Control plane | `http://localhost:8000` |
+| Agent A | `http://localhost:8001` |
+| Agent B | `http://localhost:8002` |
+| Redis | `localhost:6379` |
+| Postgres | internal only |
+
+## API Reference
+
+### Jobs
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/jobs` | Submit a new job |
+| `GET` | `/api/jobs` | List all jobs |
+| `GET` | `/api/jobs/{job_id}` | Get job status |
+| `GET` | `/api/jobs/summary` | Job counts by state |
+
+**JobSpec fields:**
 ```json
-["echo", "hello-from-demo"]
+{
+  "job_id": "my-job",
+  "image": "",
+  "cmd": ["nvidia-smi"],
+  "gpus": 1,
+  "cpu": null,
+  "mem_gb": null,
+  "priority": 0,
+  "env": {},
+  "metadata": {"partition": "gpuqs"}
+}
 ```
 
-Or submit from the API:
-```bash
-# Submit one authenticated host-mode test job to the control plane.
-# This should create a new job, enqueue it, and let the agents process it.
-curl -s -X POST http://localhost:8000/api/jobs \
-  -H "Authorization: Bearer local-operator-token" \
-  -H "Content-Type: application/json" \
-  --data '{"job_id":"demo-job-1","image":"","cmd":["echo","hello-from-demo"]}'
+- `image`: container image path. Leave empty (`""`) to run the command directly on the host.
+- `cmd`: command and arguments as a list.
+- `gpus`: number of GPUs to request.
+- `metadata.partition`: SLURM partition to submit to.
+
+### Nodes
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/nodes` | List cluster nodes with GPU info |
+
+### Metrics & Policies
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/metrics/summary` | Queue depth, latency, node counts |
+| `GET` | `/api/policies` | Active policy and supported list |
+| `PUT` | `/api/policies/active` | Change scheduling policy |
+
+## Job Lifecycle
+
+```
+QUEUED -> PLACED -> RUNNING -> DONE
+                            -> FAILED
+                            -> CANCELLED
 ```
 
-### 7. Track the job lifecycle
+- **QUEUED**: Job accepted, waiting for scheduler to place it
+- **PLACED**: Scheduler selected a node, sbatch submitted to SLURM
+- **RUNNING**: SLURM started the job (or callback received)
+- **DONE**: Job completed successfully (exit code 0)
+- **FAILED**: Job failed (non-zero exit code, timeout, node failure)
+- **CANCELLED**: Job was cancelled via scancel
 
-UI path:
-- `Admin UI -> Jobs`
-
-In the UI:
-- stay on the `Jobs` page
-- enable auto-refresh
-- watch the job move through `QUEUED -> PLACED -> RUNNING -> DONE`
-
-Or do an optional API check:
-```bash
-curl -s http://localhost:8000/api/jobs/demo-job-1
-curl -s http://localhost:8000/api/jobs
-curl -s http://localhost:8000/api/jobs/summary
-```
-
-### 8. Change scheduler policy live
-
-UI path:
-- `Admin UI -> Dashboard -> Scheduling Policy`
-
-On the dashboard:
-- switch between `FIFO`, `ROUND_ROBIN`, and `BINPACK`
-- show that the active policy changes immediately
-
-Or do an optional API check:
-```bash
-curl -s -X PUT http://localhost:8000/api/policies/active \
-  -H "Authorization: Bearer local-operator-token" \
-  -H "Content-Type: application/json" \
-  --data '{"policy":"BINPACK"}'
-
-curl -s http://localhost:8000/api/policies
-```
-
-### 9. Show metrics after running jobs
-
-UI path:
-- `Admin UI -> Dashboard`
-
-After one or more jobs complete:
-- return to the dashboard
-- show queue depth returning to zero
-- show current job counts and terminal counts updating
-- show placement and run latency summaries populated
-
-Or do an optional API check:
-```bash
-curl -s "http://localhost:8000/api/metrics/summary?window_minutes=60"
-```
-
-### 10. Stop the demo
+## Testing
 
 ```bash
-make down
-```
-
-## Run Modes
-
-### Local Dev Mode (Mac + non-GPU machines)
-
-Uses the base compose file and `GPU_METRICS_MODE=auto` (falls back to fake metrics when NVML is unavailable).
-
-Compose now enables bearer-token auth by default:
-- `AUTH_MODE=token`
-- operator token: `local-operator-token`
-- agent token: `local-agent-token`
-
-This is intentionally insecure for local development, but it exercises the Milestone 8 auth flow end to end.
-
-1. Start the stack:
-```bash
-make up
-```
-
-2. Follow logs:
-```bash
-make logs
-```
-
-3. Verify control plane readiness:
-```bash
-curl -s http://localhost:8000/health
-curl -s http://localhost:8000/version
-curl -s http://localhost:8000/ready
-```
-
-4. Verify nodes are heartbeating:
-```bash
-curl -s http://localhost:8000/api/nodes
-```
-
-5. If using `curl` for mutating APIs, include the operator token:
-```bash
-curl -s -X POST http://localhost:8000/api/jobs \
-  -H "Authorization: Bearer local-operator-token" \
-  -H "Content-Type: application/json" \
-  --data '{"job_id":"smoke-1","image":"","cmd":["echo","hello-from-worker"]}'
-```
-
-Compatibility mode:
-- set `AUTH_MODE=none` on the control plane to disable auth checks entirely
-- this keeps older local flows working while migrating, but Compose uses token mode by default
-
-### GPU Mode (NVIDIA hosts only)
-
-Use this only on Linux/WSL2 environments with NVIDIA GPU runtime configured for Docker.
-
-```bash
-make up-gpu
-make logs-gpu
-```
-
-This mode applies `/deploy/docker-compose.gpu.yml` and forces:
-- `GPU_METRICS_MODE=real`
-- NVIDIA GPU device reservation for both agent services
-
-On Apple Silicon macOS (M1/M2/M3), this mode is not supported for NVML/CUDA containers.
-
-## Submit and Track a Job
-
-1. Enqueue:
-```bash
-curl -s -X POST http://localhost:8000/api/jobs \
-  -H "Authorization: Bearer local-operator-token" \
-  -H "Content-Type: application/json" \
-  --data '{"job_id":"smoke-1","image":"","cmd":["echo","hello-from-worker"]}'
-```
-
-2. Poll status:
-```bash
-curl -s http://localhost:8000/api/jobs/smoke-1
-```
-
-3. Optional CLI watcher:
-```bash
-make cli
-.venv/bin/python cli/cli.py watch smoke-1
-```
-
-If your system `python3` is 3.13 and you see local package build issues, use Python 3.12 for the venv:
-```bash
-python3.12 -m venv .venv
-.venv/bin/pip install -r cli/requirements.txt
-.venv/bin/python cli/cli.py watch smoke-1
-```
-
-Expected lifecycle is `QUEUED -> PLACED -> RUNNING -> DONE` (or `FAILED`).
-
-Duplicate `job_id` submissions are idempotent:
-- first submission returns `201` with `"created": true`
-- repeated submission returns `200` with `"created": false` and the existing job status
-
-Protected mutating endpoints in `AUTH_MODE=token`:
-- `POST /api/jobs` requires the operator token
-- `POST /api/nodes` requires the agent token
-- `POST /api/admin/jobs/{job_id}/state` requires the agent token
-- `PUT /api/policies/active` requires the operator token
-
-## Execution Modes
-
-- Host mode: if `image` is empty, worker runs command directly.
-- Image mode: if `image` is non-empty, worker runs:
-```bash
-apptainer exec --nv <image> <cmd...>
-```
-
-Important:
-- The current `agent/Dockerfile` does not install Apptainer.
-- Image mode therefore requires either:
-  - a custom agent image with Apptainer installed, or
-  - running the agent on a host that already has Apptainer.
-- If image mode is requested without `apptainer` available, the job fails explicitly with exit code `127` and a clear reason.
-
-## Testing and CI
-
-Create a local dev environment:
-```bash
-python3.12 -m venv .venv
+python3 -m venv .venv
 .venv/bin/pip install -r dev-requirements.txt
+
+# Unit tests
+.venv/bin/python -m pytest tests/unit
+
+# Lint
+.venv/bin/python -m ruff check control_plane agent tests
 ```
-
-Run local quality gates:
-```bash
-.venv312/bin/python -m compileall -q control_plane agent cli tests
-.venv312/bin/python -m ruff check control_plane agent cli tests
-.venv312/bin/python -m pytest tests/unit
-```
-
-Run the lifecycle integration test against a live compose stack:
-```bash
-make up
-RUN_INTEGRATION=1 .venv312/bin/python -m pytest tests/integration
-```
-
-GitHub Actions:
-- PR and `main` pushes run compile, lint, and unit tests
-- integration test is available through manual workflow dispatch
-
-If your default local venv uses Python 3.13, prefer the documented Python 3.12 venv for backend tooling:
-```bash
-python3.12 -m venv .venv312
-.venv312/bin/pip install -r dev-requirements.txt
-```
-
-## GPU Metrics
-
-- `GPU_METRICS_MODE=auto` (default): try NVML, fall back to fake metrics
-- `GPU_METRICS_MODE=real`: require NVML (raises if unavailable)
-- `GPU_METRICS_MODE=fake`: always synthetic metrics
-
-For real GPU metrics in containers, Docker runtime and host GPU setup must be correct.
-
-## Metrics and Policy APIs
-
-Operator-facing read APIs:
-- `GET /api/jobs/summary`
-- `GET /api/metrics/summary`
-- `GET /api/policies`
-
-Metrics summary:
-```bash
-curl -s "http://localhost:8000/api/metrics/summary?window_minutes=60"
-```
-
-Policy read/update:
-```bash
-curl -s http://localhost:8000/api/policies
-
-curl -s -X PUT http://localhost:8000/api/policies/active \
-  -H "Authorization: Bearer local-operator-token" \
-  -H "Content-Type: application/json" \
-  --data '{"policy":"BINPACK"}'
-```
-
-`BINPACK` caveat:
-- it uses latest heartbeat inventory and average GPU utilization only
-- it does not subtract GPUs already committed to `PLACED` or `RUNNING` jobs
-- Redis security and reservation-aware accounting are intentionally deferred beyond milestone 8
-
-## Useful Commands
-
-Start:
-```bash
-make up
-```
-
-Start with NVIDIA GPU override:
-```bash
-make up-gpu
-```
-
-Stop and remove volumes:
-```bash
-make down
-```
-
-Stop GPU mode stack:
-```bash
-make down-gpu
-```
-
-Raw compose config check:
-```bash
-docker compose -f deploy/docker-compose.yml config -q
-```
-
-Raw compose config check (GPU mode):
-```bash
-docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml config -q
-```
-
-## Known Gaps (Current Prototype)
-
-- Redis still has no auth or network hardening in the prototype architecture
-- `BINPACK` is inventory-based and heuristic, not reservation-aware
-- No SLURM adapter yet (`deploy/slurm/env.sample` is placeholder only)
 
 ## Troubleshooting
 
-- `docker compose` fails immediately:
-  - ensure Docker daemon is running
-- `bind: address already in use` on `5432`:
-  - fixed in current compose by not publishing Postgres on host
-  - if you still have old containers, run `make down` then `make up`
-- `could not select device driver "" with capabilities: [[gpu]]`:
-  - you started GPU mode on a machine/runtime without NVIDIA Docker support
-  - use `make up` for local dev mode, or configure NVIDIA runtime and use `make up-gpu`
-- Jobs stay `QUEUED`:
-  - check agent heartbeats with `GET /api/nodes`
-- Jobs fail with Apptainer errors:
-  - run host mode (`"image":""`) or install Apptainer in agent runtime
+- **`sinfo: unrecognized option '--json'`**: Older SLURM version. The backend automatically falls back to text-based `sinfo` parsing.
+- **Job fails with exit code 127**: The command (or `apptainer`) was not found on the compute node. Use `"image": ""` to run commands directly.
+- **`sqlite3.OperationalError: near "ON": syntax error`**: SQLite too old for `ON CONFLICT` upserts. The code uses `INSERT OR REPLACE` which works on all versions.
+- **`sacct` returns "accounting storage is disabled"**: `sacct` must be run from a node with access to the SLURM accounting database (typically the login node, not compute nodes).
+- **Jobs stay QUEUED**: Check that `sinfo` returns nodes. If no nodes are found, the scheduler can't place jobs.
+- **Docker: `bind: address already in use`**: Run `make down` then `make up`.

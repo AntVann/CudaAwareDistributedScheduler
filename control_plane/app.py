@@ -26,7 +26,20 @@ configure_logging()
 logger = logging.getLogger("control_plane")
 
 APP_VERSION = os.getenv("APP_VERSION", "0.5.0-m5")
-scheduler = NaiveScheduler(loop_secs=1)
+
+# --- Backend selection ---
+_backend_type = os.getenv("BACKEND", "redis-agent")
+
+if _backend_type == "slurm":
+    from control_plane.core.backends.slurm import SlurmBackend
+    _backend = SlurmBackend()
+elif _backend_type == "redis-agent":
+    from control_plane.core.backends.redis_agent import RedisAgentBackend
+    _backend = RedisAgentBackend()
+else:
+    raise ValueError(f"Unknown BACKEND: {_backend_type}")
+
+scheduler = NaiveScheduler(backend=_backend, loop_secs=1)
 
 app = FastAPI(
     title="CUDA Overlay Control Plane",
@@ -56,7 +69,15 @@ def on_startup():
     else:
         logger.info("Storage bootstrap OK: postgres=%s redis=%s", ok_pg, ok_redis)
     scheduler.load_active_policy()
+    if hasattr(_backend, "start"):
+        _backend.start()
     _start_scheduler_loop()
+
+
+@app.on_event("shutdown")
+def on_shutdown():
+    if hasattr(_backend, "stop"):
+        _backend.stop()
 
 @app.get("/health")
 def health():

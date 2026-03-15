@@ -1,19 +1,19 @@
 import logging
+import time
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
+from control_plane.core.backend import ExecutionBackend
 from control_plane.core.models import JobSpec, SchedulerPolicy
 from control_plane.core.persistence import (
     get_active_policy,
     get_job_spec,
-    pg_conn,
     place_job,
     redis_client,
 )
 
 logger = logging.getLogger("control_plane.scheduler")
 
-_ASSIGN_Q_PREFIX = "assign:"
 _QUEUE_KEY = "jobs:queue"
 _ROUND_ROBIN_KEY = "rr:idx"
 
@@ -31,7 +31,13 @@ class NaiveScheduler:
     according to the active scheduling policy.
     """
 
-    def __init__(self, loop_secs: int = 1, recent_secs: int = 30):
+    def __init__(
+        self,
+        backend: Optional[ExecutionBackend] = None,
+        loop_secs: int = 1,
+        recent_secs: int = 30,
+    ):
+        self.backend = backend
         self.loop_secs = loop_secs
         self.recent_secs = recent_secs
         self.active_policy = SchedulerPolicy.FIFO
@@ -58,7 +64,13 @@ class NaiveScheduler:
             return
 
         node_id = self._select_node(r, spec, eligible_nodes)
-        r.rpush(f"{_ASSIGN_Q_PREFIX}{node_id}", job_id)
+
+        # Dispatch via backend if available, otherwise fall back to direct Redis push
+        if self.backend:
+            self.backend.submit(spec, node_hint=node_id)
+        else:
+            r.rpush(f"assign:{node_id}", job_id)
+
         place_job(job_id, node_id)
         logger.info("Placed job %s on node %s with policy %s", job_id, node_id, self.active_policy.value)
 
@@ -87,32 +99,48 @@ class NaiveScheduler:
         return ordered[0].node_id
 
     def _recent_nodes(self, seconds: int) -> List[NodeCandidate]:
-        with pg_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT node_id, gpus
-                    FROM nodes
-                    WHERE last_seen > NOW() - INTERVAL %s
-                    ORDER BY node_id
-                    """,
-                    (f"{seconds} seconds",),
+        # If we have a backend, use it for node discovery
+        if self.backend:
+            nodes = self.backend.list_nodes(recent_secs=seconds)
+            candidates: List[NodeCandidate] = []
+            for node in nodes:
+                gpu_entries = node.gpus or []
+                utilization_values = []
+                for gpu in gpu_entries:
+                    if isinstance(gpu, dict):
+                        utilization_values.append(float(gpu.get("utilization", 0.0)))
+                    elif hasattr(gpu, "utilization"):
+                        utilization_values.append(float(gpu.utilization))
+                avg_utilization = sum(utilization_values) / len(utilization_values) if utilization_values else 0.0
+                candidates.append(
+                    NodeCandidate(
+                        node_id=node.node_id,
+                        gpu_count=len(gpu_entries),
+                        avg_utilization=avg_utilization,
+                    )
                 )
-                rows = cur.fetchall()
+            return candidates
 
-        candidates: List[NodeCandidate] = []
-        for node_id, gpus in rows:
-            gpu_entries = gpus or []
-            if isinstance(gpu_entries, str):
-                gpu_entries = []
+        # Fallback: persistence-based node listing for whichever DB backend is active.
+        from control_plane.core.persistence import list_nodes as persist_list_nodes
+
+        fresh_cutoff = time.time() - seconds
+        candidates = []
+        for node in persist_list_nodes():
+            last_seen = node.last_seen or 0.0
+            if float(last_seen) < fresh_cutoff:
+                continue
+            gpu_entries = node.gpus or []
             utilization_values = []
             for gpu in gpu_entries:
                 if isinstance(gpu, dict):
                     utilization_values.append(float(gpu.get("utilization", 0.0)))
+                elif hasattr(gpu, "utilization"):
+                    utilization_values.append(float(gpu.utilization))
             avg_utilization = sum(utilization_values) / len(utilization_values) if utilization_values else 0.0
             candidates.append(
                 NodeCandidate(
-                    node_id=node_id,
+                    node_id=node.node_id,
                     gpu_count=len(gpu_entries),
                     avg_utilization=avg_utilization,
                 )
