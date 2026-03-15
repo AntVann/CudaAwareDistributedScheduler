@@ -665,13 +665,8 @@ def upsert_node(node: NodeInfo) -> None:
         with _sqlite_conn() as conn:
             conn.execute(
                 """
-                INSERT INTO nodes (node_id, labels, gpus, agent_health, last_seen)
+                INSERT OR REPLACE INTO nodes (node_id, labels, gpus, agent_health, last_seen)
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(node_id) DO UPDATE SET
-                    labels=excluded.labels,
-                    gpus=excluded.gpus,
-                    agent_health=excluded.agent_health,
-                    last_seen=excluded.last_seen
                 """,
                 (node.node_id, labels_json, serialized_gpus, agent_health_json, time.time()),
             )
@@ -906,12 +901,8 @@ def get_active_policy() -> SchedulerPolicy:
         with _sqlite_conn() as conn:
             conn.execute(
                 """
-                INSERT INTO scheduler_settings (singleton_key, active_policy, updated_at, updated_by)
+                INSERT OR REPLACE INTO scheduler_settings (singleton_key, active_policy, updated_at, updated_by)
                 VALUES (?, ?, ?, ?)
-                ON CONFLICT(singleton_key) DO UPDATE SET
-                    active_policy=excluded.active_policy,
-                    updated_at=excluded.updated_at,
-                    updated_by=excluded.updated_by
                 """,
                 (_SCHEDULER_SETTINGS_KEY, seeded_policy.value, time.time(), "startup"),
             )
@@ -941,12 +932,8 @@ def set_active_policy(policy: str, updated_by: str) -> SchedulerPolicy:
         with _sqlite_conn() as conn:
             conn.execute(
                 """
-                INSERT INTO scheduler_settings (singleton_key, active_policy, updated_at, updated_by)
+                INSERT OR REPLACE INTO scheduler_settings (singleton_key, active_policy, updated_at, updated_by)
                 VALUES (?, ?, ?, ?)
-                ON CONFLICT(singleton_key) DO UPDATE SET
-                    active_policy=excluded.active_policy,
-                    updated_at=excluded.updated_at,
-                    updated_by=excluded.updated_by
                 """,
                 (_SCHEDULER_SETTINGS_KEY, normalized.value, time.time(), updated_by),
             )

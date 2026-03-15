@@ -102,6 +102,14 @@ class SlurmBackend(ExecutionBackend):
 
     def list_nodes(self, recent_secs: int = 30) -> List[NodeInfo]:
         del recent_secs  # not used by SLURM node discovery
+
+        # Try JSON first (modern SLURM >= 22.05), fall back to text parsing.
+        nodes = self._list_nodes_json()
+        if nodes is not None:
+            return nodes
+        return self._list_nodes_text()
+
+    def _list_nodes_json(self) -> Optional[List[NodeInfo]]:
         result = subprocess.run(
             ["sinfo", "--json"],
             capture_output=True,
@@ -109,14 +117,12 @@ class SlurmBackend(ExecutionBackend):
             timeout=10,
         )
         if result.returncode != 0:
-            logger.warning("sinfo failed: %s", (result.stderr or "").strip())
-            return []
+            return None  # --json not supported, fall back to text
 
         try:
             payload = json.loads(result.stdout or "{}")
         except json.JSONDecodeError:
-            logger.warning("Unable to parse sinfo JSON output")
-            return []
+            return None
 
         rows = payload.get("nodes", [])
         now = time.time()
@@ -129,6 +135,63 @@ class SlurmBackend(ExecutionBackend):
             partition_label = ",".join(partitions) if isinstance(partitions, list) else str(partitions)
             state_label = self._coerce_state_label(row.get("state", "unknown"))
             gpu_count = self._parse_gres(row.get("gres", ""))
+            gpus = [
+                GpuInfo(index=i, name="unknown", mem_total_mb=0, utilization=0.0, mem_used_mb=0)
+                for i in range(gpu_count)
+            ]
+            nodes.append(
+                NodeInfo(
+                    node_id=node_id,
+                    gpus=gpus,
+                    labels={"partition": partition_label, "state": state_label},
+                    agent_health={"heartbeat_ts": now},
+                    last_seen=now,
+                )
+            )
+        return nodes
+
+    def _list_nodes_text(self) -> List[NodeInfo]:
+        """Parse sinfo text output for older SLURM versions."""
+        result = subprocess.run(
+            [
+                "sinfo",
+                "--Node",
+                "--noheader",
+                "--format=%N|%P|%T|%G",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            logger.warning("sinfo text fallback failed: %s", (result.stderr or "").strip())
+            return []
+
+        # Aggregate partitions per node since sinfo prints one row per node-partition pair.
+        node_map: Dict[str, dict] = {}
+        for line in (result.stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("|")
+            if len(parts) < 4:
+                continue
+            node_id = parts[0].strip()
+            partition = parts[1].strip().rstrip("*")  # Remove default partition marker
+            state = parts[2].strip()
+            gres = parts[3].strip()
+            if not node_id:
+                continue
+            if node_id not in node_map:
+                node_map[node_id] = {"partitions": set(), "state": state, "gres": gres}
+            node_map[node_id]["partitions"].add(partition)
+
+        now = time.time()
+        nodes: List[NodeInfo] = []
+        for node_id, info in sorted(node_map.items()):
+            partition_label = ",".join(sorted(info["partitions"]))
+            state_label = info["state"]
+            gpu_count = self._parse_gres(info["gres"])
             gpus = [
                 GpuInfo(index=i, name="unknown", mem_total_mb=0, utilization=0.0, mem_used_mb=0)
                 for i in range(gpu_count)
