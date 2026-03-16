@@ -49,7 +49,7 @@ class NaiveScheduler:
         if not job_id:
             return
 
-        spec = get_job_spec(job_id) or JobSpec(job_id=job_id, image="", cmd=[])
+        spec = get_job_spec(job_id) or JobSpec(job_id=job_id, project="default", image="", cmd=[])
         nodes = self._recent_nodes(self.recent_secs)
         eligible_nodes = [node for node in nodes if node.gpu_count >= spec.gpus]
         if not eligible_nodes:

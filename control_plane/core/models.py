@@ -18,6 +18,7 @@ class SchedulerPolicy(str, Enum):
 
 class JobSpec(BaseModel):
     job_id: str
+    project: str
     image: str
     cmd: List[str]
     gpus: int = 1
@@ -29,6 +30,7 @@ class JobSpec(BaseModel):
 
 class JobStatus(BaseModel):
     state: JobState
+    project: Optional[str] = None
     node_id: Optional[str] = None
     gpu_ids: List[int] = Field(default_factory=list)
     timestamps: Dict[str, Optional[float]] = Field(default_factory=dict)

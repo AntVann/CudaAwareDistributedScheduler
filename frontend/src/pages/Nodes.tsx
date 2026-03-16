@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import Card from "../components/Card";
 import { fetchNodes, type NodeInfo, type GpuInfo } from "../api/client";
+import { useOperatorAuth } from "../auth-context";
 
 function relativeTime(epochSeconds: number | null): string {
   if (!epochSeconds) return "never";
@@ -58,6 +59,7 @@ function GpuCard({ gpu }: { gpu: GpuInfo }) {
 }
 
 export default function Nodes() {
+  const { token } = useOperatorAuth();
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -65,8 +67,16 @@ export default function Nodes() {
   useEffect(() => {
     let cancelled = false;
     async function load() {
+      if (!token) {
+        if (!cancelled) {
+          setNodes([]);
+          setError("Enter a valid token to load node inventory.");
+          setLoading(false);
+        }
+        return;
+      }
       try {
-        const data = await fetchNodes();
+        const data = await fetchNodes(token);
         if (!cancelled) {
           setNodes(data);
           setError(null);
@@ -83,7 +93,7 @@ export default function Nodes() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [token]);
 
   return (
     <div className="max-w-5xl space-y-5">

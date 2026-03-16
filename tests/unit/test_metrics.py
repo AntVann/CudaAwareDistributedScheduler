@@ -65,7 +65,7 @@ def test_metrics_summary_handles_empty_state(monkeypatch):
     monkeypatch.setattr(
         persistence,
         "job_summary",
-        lambda: {
+        lambda **kwargs: {
             "queued": 0,
             "placed": 0,
             "running": 0,
@@ -75,7 +75,7 @@ def test_metrics_summary_handles_empty_state(monkeypatch):
         },
     )
 
-    summary = persistence.read_metrics_summary(window_minutes=60, fresh_node_seconds=30)
+    summary = persistence.read_metrics_summary(window_minutes=60, fresh_node_seconds=30, is_admin=True)
 
     assert summary["queue_depth"] == 0
     assert summary["jobs"]["queued"] == 0
@@ -130,7 +130,7 @@ def test_metrics_latency_ignores_incomplete_timestamp_sets(monkeypatch):
     monkeypatch.setattr(
         persistence,
         "job_summary",
-        lambda: {
+        lambda **kwargs: {
             "queued": 1,
             "placed": 0,
             "running": 1,
@@ -140,7 +140,7 @@ def test_metrics_latency_ignores_incomplete_timestamp_sets(monkeypatch):
         },
     )
 
-    summary = persistence.read_metrics_summary(window_minutes=10, fresh_node_seconds=30)
+    summary = persistence.read_metrics_summary(window_minutes=10, fresh_node_seconds=30, is_admin=True)
 
     assert summary["queue_depth"] == 3
     assert summary["nodes"] == {"total": 2, "fresh": 1, "stale": 1}

@@ -10,15 +10,18 @@ from fastapi.responses import JSONResponse
 from control_plane.api.admin import router as admin_router
 from control_plane.api.auth import validate_auth_settings
 from control_plane.api.jobs import router as jobs_router
+from control_plane.api.me import router as me_router
 from control_plane.api.metrics import router as metrics_router
 from control_plane.api.nodes import router as nodes_router
 from control_plane.api.policies import router as policies_router
+from control_plane.api.token_requests import router as token_requests_router
 from control_plane.loggingConf import configure_logging
 from control_plane.core.scheduler import NaiveScheduler
 from control_plane.core.persistence import (
     bootstrap_storage,
     check_postgres,
     check_redis,
+    ensure_bootstrap_admin_token,
     ready_report,
 )
 
@@ -49,6 +52,7 @@ def on_startup():
     logger.info("Bootstrapping storage (schema + readiness checks)...")
     bootstrap_storage()
     validate_auth_settings()
+    ensure_bootstrap_admin_token()
     ok_pg = check_postgres()
     ok_redis = check_redis()
     if not (ok_pg and ok_redis):
@@ -99,4 +103,6 @@ app.include_router(policies_router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
 app.include_router(nodes_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")
+app.include_router(me_router, prefix="/api")
+app.include_router(token_requests_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")

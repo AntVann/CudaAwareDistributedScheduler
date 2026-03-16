@@ -21,48 +21,42 @@ VITE_API_BASE=http://localhost:8000 npm run dev
 
 ## Auth Flow
 
-Milestone 8 does not add a sign-in screen.
+This milestone uses bearer tokens, not username/password login.
 
-Instead:
 1. Open the UI
-2. Enter the operator token in the sidebar
-3. The token is stored in `sessionStorage`
-4. Only operator-scoped mutating requests attach the bearer token
+2. Enter API token in sidebar
+3. Token is stored in `sessionStorage`
+4. UI probes `/api/me` to determine identity (`admin` or `user`)
 
 Local Compose defaults:
-- operator token: `local-operator-token`
-- agent token: `local-agent-token`
+- bootstrap admin token: `local-operator-token`
+- internal agent token: `local-agent-token`
+- token emails are delivered through configured SMTP (`SMTP_*` env vars)
 
-Read-only pages remain usable without a token.
+Users without token can submit a request from `/request-token`.
 
-## Dashboard
+## Pages
 
-The dashboard polls:
-- `/health`
-- `/ready`
-- `/api/metrics/summary`
-- `/api/policies`
+Dashboard:
+- polls `/health` and `/ready` publicly
+- polls `/api/metrics/summary` and `/api/policies` with token
+- policy changes require admin token
 
-It shows:
-- queue depth
-- current jobs by state
-- fresh vs stale nodes
-- placement and run latency percentiles
-- recent `DONE` and `FAILED` terminal counts
-- active scheduler policy with operator-only update controls
+Jobs:
+- reads `GET /api/jobs` with token
+- submits `POST /api/jobs` with required `project` field
 
-## Jobs Page
+Nodes:
+- reads `GET /api/nodes` with token
 
-The jobs page:
-- lists recent jobs from `GET /api/jobs`
-- supports auto-refresh polling every 3 seconds
-- submits test jobs through `POST /api/jobs`
+Request Token:
+- public form that submits `POST /api/token-requests`
 
-Submitting a job requires the operator token.
-
-## Nodes Page
-
-The nodes page remains read-only and polls `GET /api/nodes` every 5 seconds.
+Admin Token Requests:
+- admin-only page for:
+  - list pending token requests
+  - approve/reject requests
+  - list/revoke issued tokens
 
 ## Build and Lint
 
@@ -70,7 +64,3 @@ The nodes page remains read-only and polls `GET /api/nodes` every 5 seconds.
 npm run lint
 npm run build
 ```
-
-Note:
-- the current local Node version may print a Vite warning if it is older than `20.19`
-- the build still succeeds in the current project environment, but upgrading Node removes the warning

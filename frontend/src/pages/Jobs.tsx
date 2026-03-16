@@ -29,6 +29,7 @@ export default function Jobs() {
 
   // Submit form state
   const [showSubmit, setShowSubmit] = useState(false);
+  const [project, setProject] = useState("default");
   const [cmd, setCmd] = useState('["echo", "hello"]');
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState<{ msg: string; ok: boolean } | null>(null);
@@ -36,8 +37,14 @@ export default function Jobs() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadJobs = useCallback(async () => {
+    if (!token) {
+      setJobs([]);
+      setError("Enter a valid token to load jobs.");
+      setLoading(false);
+      return;
+    }
     try {
-      const data = await fetchJobs();
+      const data = await fetchJobs(token);
       setJobs(data);
       setError(null);
     } catch (err) {
@@ -45,7 +52,7 @@ export default function Jobs() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [token]);
 
   useEffect(() => {
     void loadJobs();
@@ -68,11 +75,15 @@ export default function Jobs() {
     try {
       const parsedCmd: string[] = JSON.parse(cmd);
       const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      const res: EnqueueResponse = await submitJob({
-        job_id: jobId,
-        image: "",
-        cmd: parsedCmd,
-      }, token);
+      const res: EnqueueResponse = await submitJob(
+        {
+          job_id: jobId,
+          project: project.trim(),
+          image: "",
+          cmd: parsedCmd,
+        },
+        token
+      );
       setSubmitResult({
         msg: res.created
           ? `Created job ${res.job_id} (201)`
@@ -118,10 +129,17 @@ export default function Jobs() {
         <Card>
           <h3 className="text-sm font-medium text-text-secondary mb-3">Submit a Test Job</h3>
           <p className="mb-3 text-xs text-text-muted">
-            This action requires the operator token stored in the sidebar.
+            This action requires a valid user/admin token stored in the sidebar.
           </p>
           <div className="flex gap-3 items-end">
             <div className="flex-1">
+              <label className="block text-xs text-text-muted mb-1">Project</label>
+              <input
+                type="text"
+                value={project}
+                onChange={(e) => setProject(e.target.value)}
+                className="mb-3 w-full rounded-md border border-border bg-surface-0 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent"
+              />
               <label className="block text-xs text-text-muted mb-1">Command (JSON array)</label>
               <input
                 type="text"
@@ -166,6 +184,7 @@ export default function Jobs() {
               <tr className="border-b border-border bg-surface-1 text-left text-xs text-text-muted">
                 <th className="px-4 py-2.5 font-medium">Job ID</th>
                 <th className="px-4 py-2.5 font-medium">State</th>
+                <th className="px-4 py-2.5 font-medium">Project</th>
                 <th className="px-4 py-2.5 font-medium">Node</th>
                 <th className="px-4 py-2.5 font-medium">Exit Code</th>
                 <th className="px-4 py-2.5 font-medium">Reason</th>
@@ -184,6 +203,9 @@ export default function Jobs() {
                       <StatusBadge state={job.state} />
                     </td>
                     <td className="px-4 py-2.5 font-mono text-xs text-text-secondary">
+                      {job.project}
+                    </td>
+                    <td className="px-4 py-2.5 font-mono text-xs text-text-secondary">
                       {job.node_id ?? "-"}
                     </td>
                     <td className="px-4 py-2.5 font-mono text-xs text-text-secondary">
@@ -198,7 +220,7 @@ export default function Jobs() {
                   </tr>
                   {expandedId === job.job_id && (
                     <tr className="border-b border-border bg-surface-2/30">
-                      <td colSpan={6} className="px-6 py-4">
+                      <td colSpan={7} className="px-6 py-4">
                         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
                           <div>
                             <span className="text-text-muted">GPU IDs:</span>{" "}

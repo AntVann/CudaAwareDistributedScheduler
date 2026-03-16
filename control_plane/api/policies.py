@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from control_plane.api.auth import require_operator
+from control_plane.api.auth import require_admin, require_user_or_admin
 from control_plane.core.models import SchedulerPolicy
 from control_plane.core.persistence import get_active_policy, set_active_policy, supported_policies
 
@@ -20,7 +20,10 @@ def _policy_response(active: SchedulerPolicy) -> dict[str, object]:
 
 
 @router.get("/policies")
-def list_policies(request: Request):
+def list_policies(
+    request: Request,
+    _authorized=Depends(require_user_or_admin),
+):
     """
     Expose available scheduling policies and the currently selected value.
     """
@@ -33,7 +36,7 @@ def list_policies(request: Request):
 def update_active_policy(
     body: PolicyUpdateRequest,
     request: Request,
-    _authorized: None = Depends(require_operator),
+    _authorized=Depends(require_admin),
 ):
     try:
         active = set_active_policy(body.policy.value, updated_by="operator")

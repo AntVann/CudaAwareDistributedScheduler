@@ -1,22 +1,25 @@
 .PHONY: up up-gpu down down-gpu logs logs-gpu cli compile fmt lint test test-integration
 
+COMPOSE := docker compose --env-file .env -f deploy/docker-compose.yml
+COMPOSE_GPU := docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml
+
 up:
-	@docker compose -f deploy/docker-compose.yml up --build -d
+	@$(COMPOSE) up --build -d
 
 up-gpu:
-	@docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml up --build -d
+	@$(COMPOSE_GPU) up --build -d
 
 down:
-	@docker compose -f deploy/docker-compose.yml down -v
+	@$(COMPOSE) down -v
 
 down-gpu:
-	@docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml down -v
+	@$(COMPOSE_GPU) down -v
 
 logs:
-	@docker compose -f deploy/docker-compose.yml logs -f --tail=200
+	@$(COMPOSE) logs -f --tail=200
 
 logs-gpu:
-	@docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml logs -f --tail=200
+	@$(COMPOSE_GPU) logs -f --tail=200
 
 cli:
 	@python3 -m venv .venv && . .venv/bin/activate && pip install -r cli/requirements.txt

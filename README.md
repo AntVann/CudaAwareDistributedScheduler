@@ -10,6 +10,38 @@ Milestone 8 prototype for a CUDA-aware overlay scheduler with:
 - React/Vite admin UI with metrics and policy controls
 - Unit tests, lifecycle integration test, and CI quality gates
 
+## Auth/Authz v1 (Current)
+
+The current branch adds user-level and project-level token authorization:
+- human roles: `admin`, `user`
+- internal service role: `agent` (not requestable by users)
+- required `project` field on `POST /api/jobs`
+- project-scoped job visibility for non-admin users
+- public token-request endpoint: `POST /api/token-requests`
+- admin approval endpoints under `/api/admin/token-requests`
+
+Bootstrap tokens in local Compose:
+- admin token: `local-operator-token` (via `ADMIN_API_TOKEN`)
+- agent token: `local-agent-token` (via `AGENT_API_TOKEN`)
+- SMTP for token delivery is configured via:
+  - `SMTP_HOST` (default `smtp.gmail.com`)
+  - `SMTP_PORT` (default `587`)
+  - `SMTP_USER` (sender account username)
+  - `SMTP_PASS` (sender app password)
+  - `SMTP_FROM` (from email)
+  - `SMTP_STARTTLS` (default `true`)
+
+Protected read APIs now require user/admin token:
+- `/api/jobs*`
+- `/api/nodes`
+- `/api/metrics/*`
+- `/api/policies*`
+
+Public liveness endpoints remain open:
+- `/health`
+- `/ready`
+- `/version`
+
 ## Prerequisites
 
 Required:
@@ -21,6 +53,16 @@ Required:
 Optional:
 - Python 3.11+ (for local CLI usage)
 - NVIDIA driver + container toolkit (if you want real GPU metrics in containers)
+
+## SMTP Setup (Real Email)
+
+For real token-delivery emails, copy `.env.example` to `.env` and fill in your Gmail SMTP values:
+
+```bash
+cp .env.example .env
+```
+
+`docker compose` will load `.env` automatically when you run `make up`.
 
 ## Services and Ports
 

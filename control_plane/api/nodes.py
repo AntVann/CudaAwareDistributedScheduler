@@ -3,7 +3,7 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from control_plane.api.auth import require_agent
+from control_plane.api.auth import require_agent, require_user_or_admin
 from control_plane.core.models import NodeInfo
 from control_plane.core.persistence import list_nodes as persist_list_nodes
 from control_plane.core.persistence import upsert_node as persist_upsert_node
@@ -13,7 +13,7 @@ logger = logging.getLogger("control_plane.api.nodes")
 
 
 @router.get("/nodes", response_model=List[NodeInfo])
-def list_nodes():
+def list_nodes(_authorized=Depends(require_user_or_admin)):
     """
     Return the current known nodes and their latest heartbeat payloads.
     """

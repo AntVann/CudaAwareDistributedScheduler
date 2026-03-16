@@ -43,7 +43,7 @@ def test_tick_requeues_job_when_no_eligible_nodes(monkeypatch):
     monkeypatch.setattr(
         scheduler_module,
         "get_job_spec",
-        lambda job_id: JobSpec(job_id=job_id, image="", cmd=["echo", "hi"], gpus=2),
+        lambda job_id: JobSpec(job_id=job_id, project="default", image="", cmd=["echo", "hi"], gpus=2),
     )
     place_calls = []
     monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
@@ -70,7 +70,7 @@ def test_fifo_selects_first_eligible_node_in_sorted_order(monkeypatch):
     monkeypatch.setattr(
         scheduler_module,
         "get_job_spec",
-        lambda job_id: JobSpec(job_id=job_id, image="", cmd=["echo", "hi"], gpus=2),
+        lambda job_id: JobSpec(job_id=job_id, project="default", image="", cmd=["echo", "hi"], gpus=2),
     )
     place_calls = []
     monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
@@ -85,7 +85,7 @@ def test_round_robin_cycles_across_eligible_nodes():
     scheduler = scheduler_module.NaiveScheduler()
     scheduler.set_active_policy(SchedulerPolicy.ROUND_ROBIN)
     fake_redis = FakeRedis(job_ids=[])
-    spec = JobSpec(job_id="job-1", image="", cmd=["echo"], gpus=1)
+    spec = JobSpec(job_id="job-1", project="default", image="", cmd=["echo"], gpus=1)
     nodes = [
         NodeCandidate(node_id="node-b", gpu_count=2, avg_utilization=0.0),
         NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0),
@@ -102,7 +102,7 @@ def test_binpack_uses_surplus_then_utilization_then_node_id():
     scheduler = scheduler_module.NaiveScheduler()
     scheduler.set_active_policy(SchedulerPolicy.BINPACK)
     fake_redis = FakeRedis(job_ids=[])
-    spec = JobSpec(job_id="job-1", image="", cmd=["echo"], gpus=2)
+    spec = JobSpec(job_id="job-1", project="default", image="", cmd=["echo"], gpus=2)
     nodes = [
         NodeCandidate(node_id="node-z", gpu_count=4, avg_utilization=95.0),
         NodeCandidate(node_id="node-c", gpu_count=3, avg_utilization=40.0),
