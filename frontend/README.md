@@ -45,6 +45,7 @@ Dashboard:
 Jobs:
 - reads `GET /api/jobs` with token
 - submits `POST /api/jobs` with required `project` field
+- for `user` role, project selection is sourced from `/api/me.projects` (dropdown)
 
 Nodes:
 - reads `GET /api/nodes` with token

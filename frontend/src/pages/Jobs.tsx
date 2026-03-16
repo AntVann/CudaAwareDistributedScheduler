@@ -20,7 +20,7 @@ function truncate(s: string | null | undefined, max = 60): string {
 }
 
 export default function Jobs() {
-  const { token } = useOperatorAuth();
+  const { token, me, loadingMe } = useOperatorAuth();
   const [jobs, setJobs] = useState<JobListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -29,7 +29,7 @@ export default function Jobs() {
 
   // Submit form state
   const [showSubmit, setShowSubmit] = useState(false);
-  const [project, setProject] = useState("default");
+  const [project, setProject] = useState("");
   const [cmd, setCmd] = useState('["echo", "hello"]');
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState<{ msg: string; ok: boolean } | null>(null);
@@ -57,6 +57,19 @@ export default function Jobs() {
   useEffect(() => {
     void loadJobs();
   }, [loadJobs]);
+
+  useEffect(() => {
+    if (!me) return;
+    if (me.role === "user") {
+      if (me.projects.length === 0) {
+        setProject("");
+        return;
+      }
+      setProject((prev) => (me.projects.includes(prev) ? prev : me.projects[0]));
+      return;
+    }
+    setProject((prev) => prev || "default");
+  }, [me]);
 
   useEffect(() => {
     if (autoRefresh) {
@@ -134,12 +147,33 @@ export default function Jobs() {
           <div className="flex gap-3 items-end">
             <div className="flex-1">
               <label className="block text-xs text-text-muted mb-1">Project</label>
-              <input
-                type="text"
-                value={project}
-                onChange={(e) => setProject(e.target.value)}
-                className="mb-3 w-full rounded-md border border-border bg-surface-0 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent"
-              />
+              {me?.role === "user" ? (
+                <select
+                  value={project}
+                  onChange={(e) => setProject(e.target.value)}
+                  disabled={loadingMe || me.projects.length === 0}
+                  className="mb-3 w-full rounded-md border border-border bg-surface-0 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent disabled:opacity-60"
+                >
+                  {me.projects.length === 0 ? (
+                    <option value="">
+                      {loadingMe ? "Loading allowed projects..." : "No allowed projects assigned"}
+                    </option>
+                  ) : (
+                    me.projects.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))
+                  )}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={project}
+                  onChange={(e) => setProject(e.target.value)}
+                  className="mb-3 w-full rounded-md border border-border bg-surface-0 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent"
+                />
+              )}
               <label className="block text-xs text-text-muted mb-1">Command (JSON array)</label>
               <input
                 type="text"
@@ -150,7 +184,7 @@ export default function Jobs() {
             </div>
             <button
               onClick={handleSubmit}
-              disabled={submitting || !token}
+              disabled={submitting || !token || !project.trim()}
               className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50 transition-colors"
             >
               {submitting ? "Submitting..." : token ? "Submit" : "Token Required"}

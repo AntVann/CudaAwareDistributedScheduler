@@ -20,6 +20,9 @@ The current branch adds user-level and project-level token authorization:
 - public token-request endpoint: `POST /api/token-requests`
 - admin approval endpoints under `/api/admin/token-requests`
 
+Auth source of truth for current implementation:
+- `docs/milestone-8.1-auth.md`
+
 Bootstrap tokens in local Compose:
 - admin token: `local-operator-token` (via `ADMIN_API_TOKEN`)
 - agent token: `local-agent-token` (via `AGENT_API_TOKEN`)
@@ -253,10 +256,13 @@ Uses the base compose file and `GPU_METRICS_MODE=auto` (falls back to fake metri
 
 Compose now enables bearer-token auth by default:
 - `AUTH_MODE=token`
-- operator token: `local-operator-token`
+- bootstrap admin token: `local-operator-token`
 - agent token: `local-agent-token`
 
 This is intentionally insecure for local development, but it exercises the Milestone 8 auth flow end to end.
+
+For full current auth details, use:
+- `docs/milestone-8.1-auth.md`
 
 1. Start the stack:
 ```bash
@@ -277,15 +283,16 @@ curl -s http://localhost:8000/ready
 
 4. Verify nodes are heartbeating:
 ```bash
-curl -s http://localhost:8000/api/nodes
+curl -s http://localhost:8000/api/nodes \
+  -H "Authorization: Bearer local-operator-token"
 ```
 
-5. If using `curl` for mutating APIs, include the operator token:
+5. If using `curl` for protected APIs, include a user/admin token:
 ```bash
 curl -s -X POST http://localhost:8000/api/jobs \
   -H "Authorization: Bearer local-operator-token" \
   -H "Content-Type: application/json" \
-  --data '{"job_id":"smoke-1","image":"","cmd":["echo","hello-from-worker"]}'
+  --data '{"job_id":"smoke-1","project":"default","image":"","cmd":["echo","hello-from-worker"]}'
 ```
 
 Compatibility mode:
@@ -314,12 +321,13 @@ On Apple Silicon macOS (M1/M2/M3), this mode is not supported for NVML/CUDA cont
 curl -s -X POST http://localhost:8000/api/jobs \
   -H "Authorization: Bearer local-operator-token" \
   -H "Content-Type: application/json" \
-  --data '{"job_id":"smoke-1","image":"","cmd":["echo","hello-from-worker"]}'
+  --data '{"job_id":"smoke-1","project":"default","image":"","cmd":["echo","hello-from-worker"]}'
 ```
 
 2. Poll status:
 ```bash
-curl -s http://localhost:8000/api/jobs/smoke-1
+curl -s http://localhost:8000/api/jobs/smoke-1 \
+  -H "Authorization: Bearer local-operator-token"
 ```
 
 3. Optional CLI watcher:
@@ -341,11 +349,12 @@ Duplicate `job_id` submissions are idempotent:
 - first submission returns `201` with `"created": true`
 - repeated submission returns `200` with `"created": false` and the existing job status
 
-Protected mutating endpoints in `AUTH_MODE=token`:
-- `POST /api/jobs` requires the operator token
+Protected endpoints in `AUTH_MODE=token`:
+- `POST /api/jobs` requires user/admin token and a required `project`
 - `POST /api/nodes` requires the agent token
 - `POST /api/admin/jobs/{job_id}/state` requires the agent token
-- `PUT /api/policies/active` requires the operator token
+- `PUT /api/policies/active` requires admin token
+- `GET /api/jobs*`, `GET /api/nodes`, `GET /api/metrics/*`, and `GET /api/policies*` require user/admin token
 
 ## Execution Modes
 
@@ -403,19 +412,21 @@ For real GPU metrics in containers, Docker runtime and host GPU setup must be co
 
 ## Metrics and Policy APIs
 
-Operator-facing read APIs:
+User/admin read APIs:
 - `GET /api/jobs/summary`
 - `GET /api/metrics/summary`
 - `GET /api/policies`
 
 Metrics summary:
 ```bash
-curl -s "http://localhost:8000/api/metrics/summary?window_minutes=60"
+curl -s "http://localhost:8000/api/metrics/summary?window_minutes=60" \
+  -H "Authorization: Bearer local-operator-token"
 ```
 
 Policy read/update:
 ```bash
-curl -s http://localhost:8000/api/policies
+curl -s http://localhost:8000/api/policies \
+  -H "Authorization: Bearer local-operator-token"
 
 curl -s -X PUT http://localhost:8000/api/policies/active \
   -H "Authorization: Bearer local-operator-token" \
