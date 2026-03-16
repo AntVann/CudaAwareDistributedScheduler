@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   submitted_by TEXT,
   spec JSONB NOT NULL,
   status TEXT NOT NULL,
+  backend_ref TEXT,
   node_id TEXT,
   gpu_ids INT[],
   timestamps JSONB,
@@ -34,7 +35,6 @@ CREATE TABLE IF NOT EXISTS scheduler_settings (
   updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_by TEXT
 );
-
 CREATE TABLE IF NOT EXISTS api_tokens (
   id UUID PRIMARY KEY,
   token_hash TEXT NOT NULL UNIQUE,
@@ -71,3 +71,5 @@ ALTER TABLE jobs
   ALTER COLUMN project SET DEFAULT 'default';
 ALTER TABLE jobs
   ALTER COLUMN project SET NOT NULL;
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS backend_ref TEXT;
