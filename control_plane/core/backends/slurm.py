@@ -125,6 +125,8 @@ class SlurmBackend(ExecutionBackend):
             return None
 
         rows = payload.get("nodes", [])
+        if not isinstance(rows, list) or not rows:
+            return None
         now = time.time()
         nodes: List[NodeInfo] = []
         for row in rows:
@@ -134,7 +136,9 @@ class SlurmBackend(ExecutionBackend):
             partitions = row.get("partitions") or []
             partition_label = ",".join(partitions) if isinstance(partitions, list) else str(partitions)
             state_label = self._coerce_state_label(row.get("state", "unknown"))
-            gpu_count = self._parse_gres(row.get("gres", ""))
+            gpu_count = self._coerce_gpu_count(row)
+            gpu_used = self._coerce_gpu_usage(row)
+            gpu_available = max(gpu_count - gpu_used, 0)
             gpus = [
                 GpuInfo(index=i, name="unknown", mem_total_mb=0, utilization=0.0, mem_used_mb=0)
                 for i in range(gpu_count)
@@ -143,12 +147,18 @@ class SlurmBackend(ExecutionBackend):
                 NodeInfo(
                     node_id=node_id,
                     gpus=gpus,
-                    labels={"partition": partition_label, "state": state_label},
+                    labels={
+                        "partition": partition_label,
+                        "state": state_label,
+                        "gpu_total": str(gpu_count),
+                        "gpu_used": str(gpu_used),
+                        "gpu_available": str(gpu_available),
+                    },
                     agent_health={"heartbeat_ts": now},
                     last_seen=now,
                 )
             )
-        return nodes
+        return nodes or None
 
     def _list_nodes_text(self) -> List[NodeInfo]:
         """Parse sinfo text output for older SLURM versions."""
@@ -157,7 +167,7 @@ class SlurmBackend(ExecutionBackend):
                 "sinfo",
                 "--Node",
                 "--noheader",
-                "--format=%N|%P|%T|%G",
+                "--Format=NodeList,Partition,StateLong,Gres,GresUsed",
             ],
             capture_output=True,
             text=True,
@@ -173,17 +183,18 @@ class SlurmBackend(ExecutionBackend):
             line = line.strip()
             if not line:
                 continue
-            parts = line.split("|")
-            if len(parts) < 4:
+            parts = line.split(None, 4)
+            if len(parts) < 5:
                 continue
             node_id = parts[0].strip()
             partition = parts[1].strip().rstrip("*")  # Remove default partition marker
             state = parts[2].strip()
             gres = parts[3].strip()
+            gres_used = parts[4].strip()
             if not node_id:
                 continue
             if node_id not in node_map:
-                node_map[node_id] = {"partitions": set(), "state": state, "gres": gres}
+                node_map[node_id] = {"partitions": set(), "state": state, "gres": gres, "gres_used": gres_used}
             node_map[node_id]["partitions"].add(partition)
 
         now = time.time()
@@ -192,6 +203,8 @@ class SlurmBackend(ExecutionBackend):
             partition_label = ",".join(sorted(info["partitions"]))
             state_label = info["state"]
             gpu_count = self._parse_gres(info["gres"])
+            gpu_used = self._parse_gres(info.get("gres_used", ""))
+            gpu_available = max(gpu_count - gpu_used, 0)
             gpus = [
                 GpuInfo(index=i, name="unknown", mem_total_mb=0, utilization=0.0, mem_used_mb=0)
                 for i in range(gpu_count)
@@ -200,7 +213,13 @@ class SlurmBackend(ExecutionBackend):
                 NodeInfo(
                     node_id=node_id,
                     gpus=gpus,
-                    labels={"partition": partition_label, "state": state_label},
+                    labels={
+                        "partition": partition_label,
+                        "state": state_label,
+                        "gpu_total": str(gpu_count),
+                        "gpu_used": str(gpu_used),
+                        "gpu_available": str(gpu_available),
+                    },
                     agent_health={"heartbeat_ts": now},
                     last_seen=now,
                 )
@@ -523,6 +542,25 @@ class SlurmBackend(ExecutionBackend):
         if isinstance(value, dict):
             return ",".join(f"{k}={v}" for k, v in value.items())
         return str(value)
+
+    @classmethod
+    def _coerce_gpu_count(cls, row: dict) -> int:
+        counts = [
+            cls._parse_gres(row.get("gres", "")),
+            cls._parse_gres(row.get("tres", "")),
+            cls._parse_gres(row.get("tres_fmt_str", "")),
+            cls._parse_gres(row.get("gpu_spec", "")),
+        ]
+        return max(counts, default=0)
+
+    @classmethod
+    def _coerce_gpu_usage(cls, row: dict) -> int:
+        counts = [
+            cls._parse_gres(row.get("gres_used", "")),
+            cls._parse_gres(row.get("tres_used", "")),
+            cls._parse_gres(row.get("alloc_tres", "")),
+        ]
+        return max(counts, default=0)
 
     @staticmethod
     def _parse_gres(value: object) -> int:

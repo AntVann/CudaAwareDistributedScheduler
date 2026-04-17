@@ -71,13 +71,16 @@ rsync -avz \
 ### 2. Set up Python environment on HPC
 
 ```bash
-# SSH into the HPC login node
+# From your local machine, SSH into the HPC login node
+ssh <your-id>@<hpc-login-node>
+
+# On the HPC login node:
 module load python3/3.11.5    # or whichever 3.10+ is available
 cd ~/CudaAwareDistributedScheduler
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install fastapi uvicorn pydantic
+pip install -r requirements.txt
 ```
 
 ### 3. Start the control plane
@@ -85,11 +88,15 @@ pip install fastapi uvicorn pydantic
 ```bash
 export BACKEND=slurm
 export DATABASE_URL="sqlite:////home/<your-id>/scheduler.db"
-export OPERATOR_TOKEN="demo-token-123"
+export QUEUE_BACKEND=memory
+export AUTH_MODE=token
+export OPERATOR_API_TOKEN="replace-with-operator-token"
+export AGENT_API_TOKEN="replace-with-agent-token"
+export CONTROL_PLANE_CALLBACK_URL="http://<login-node>:8000"
 export SLURM_POLL_INTERVAL_SECS=10
 
 cd ~/CudaAwareDistributedScheduler
-python -m uvicorn control_plane.app:app --host 0.0.0.0 --port 8000
+python3 -m uvicorn control_plane.app:app --host 0.0.0.0 --port 8000
 ```
 
 You should see:
@@ -102,7 +109,13 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 
 From a second terminal on the cluster:
 ```bash
+ssh <your-id>@<hpc-login-node>
+
+cd ~/CudaAwareDistributedScheduler
+source .venv/bin/activate
+
 curl -X POST http://<login-node>:8000/api/jobs \
+  -H "Authorization: Bearer replace-with-operator-token" \
   -H "Content-Type: application/json" \
   -d '{
     "job_id": "test-001",
@@ -146,13 +159,19 @@ Open `http://localhost:5173` in your browser to see the dashboard.
 |----------|---------|-------------|
 | `BACKEND` | `redis-agent` | Set to `slurm` for HPC mode |
 | `DATABASE_URL` | — | `sqlite:///path/to/scheduler.db` |
+| `QUEUE_BACKEND` | `memory` when using sqlite + slurm | Use `memory` for single-process HPC mode |
+| `AUTH_MODE` | `none` | Set to `token` to require bearer auth |
 | `SLURM_POLL_INTERVAL_SECS` | `15` | How often to poll sacct for job updates |
 | `SLURM_DEFAULT_PARTITION` | `gpu` | Default SLURM partition if not specified in job |
 | `SLURM_LOG_DIR` | `/tmp/scheduler-logs` | Where SLURM stdout/stderr logs go |
 | `SLURM_SCRIPT_DIR` | `/tmp/scheduler-scripts` | Where generated sbatch scripts are stored |
 | `CONTROL_PLANE_CALLBACK_URL` | `http://127.0.0.1:8000` | URL compute nodes use to call back to the control plane |
 | `AGENT_API_TOKEN` | — | Token for agent-scope auth on callbacks |
-| `OPERATOR_TOKEN` | — | Token for operator-scope auth |
+| `OPERATOR_API_TOKEN` | — | Token for operator-scope auth |
+
+### SJSU-style demo flow
+
+If you want a copy-pasteable HPC demo sequence, see [docs/project-demo.md](/Users/serhatgundem/Projects/CudaAwareDistributedScheduler/docs/project-demo.md).
 
 ## Quick Start: Local Development (Docker)
 

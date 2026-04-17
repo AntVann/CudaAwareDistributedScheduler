@@ -111,6 +111,89 @@ def test_list_nodes_parses_gpu_count(monkeypatch):
     assert len(nodes[0].gpus) == 4
     assert nodes[0].labels["partition"] == "gpu-a100"
     assert nodes[0].labels["state"] == "idle"
+    assert nodes[0].labels["gpu_available"] == "4"
+
+
+def test_list_nodes_falls_back_to_text_when_json_payload_has_no_nodes(monkeypatch):
+    backend = SlurmBackend()
+    calls = []
+
+    def fake_run(args, capture_output, text, timeout):
+        calls.append(args)
+        if args == ["sinfo", "--json"]:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout='{"meta":{"cluster":"test"},"errors":[],"warnings":[]}',
+                stderr="",
+            )
+        assert args == ["sinfo", "--Node", "--noheader", "--Format=NodeList,Partition,StateLong,Gres,GresUsed"]
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="gpu-01 gpu-a100* idle gpu:a100:4 gpu:a100:1\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("control_plane.core.backends.slurm.subprocess.run", fake_run)
+    nodes = backend.list_nodes()
+
+    assert calls == [
+        ["sinfo", "--json"],
+        ["sinfo", "--Node", "--noheader", "--Format=NodeList,Partition,StateLong,Gres,GresUsed"],
+    ]
+    assert len(nodes) == 1
+    assert nodes[0].node_id == "gpu-01"
+    assert len(nodes[0].gpus) == 4
+    assert nodes[0].labels["partition"] == "gpu-a100"
+    assert nodes[0].labels["gpu_available"] == "3"
+
+
+def test_list_nodes_json_uses_tres_when_gres_is_empty(monkeypatch):
+    backend = SlurmBackend()
+
+    def fake_run(args, capture_output, text, timeout):
+        assert args == ["sinfo", "--json"]
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=(
+                '{"nodes":[{"name":"gpu-01","gres":"","tres":"cpu=32,mem=257000M,gres/gpu=4",'
+                '"partitions":["gpu-a100"],"state":"idle"}]}'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("control_plane.core.backends.slurm.subprocess.run", fake_run)
+    nodes = backend.list_nodes()
+
+    assert len(nodes) == 1
+    assert nodes[0].node_id == "gpu-01"
+    assert len(nodes[0].gpus) == 4
+
+
+def test_list_nodes_json_tracks_gpu_usage_from_gres_used(monkeypatch):
+    backend = SlurmBackend()
+
+    def fake_run(args, capture_output, text, timeout):
+        assert args == ["sinfo", "--json"]
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=(
+                '{"nodes":[{"name":"gpu-01","gres":"gpu:a100:4","gres_used":"gpu:a100:3",'
+                '"partitions":["gpu-a100"],"state":"mixed"}]}'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("control_plane.core.backends.slurm.subprocess.run", fake_run)
+    nodes = backend.list_nodes()
+
+    assert len(nodes) == 1
+    assert nodes[0].labels["gpu_total"] == "4"
+    assert nodes[0].labels["gpu_used"] == "3"
+    assert nodes[0].labels["gpu_available"] == "1"
 
 
 def test_cancel_uses_scancel(monkeypatch):

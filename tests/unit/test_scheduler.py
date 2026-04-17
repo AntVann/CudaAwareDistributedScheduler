@@ -50,9 +50,135 @@ def test_tick_requeues_job_when_no_eligible_nodes(monkeypatch):
 
     SchedulerStub(nodes=[NodeCandidate(node_id="node-a", gpu_count=1, avg_utilization=0.0)]).tick()
 
-    assert fake_redis.left_pushes == [("jobs:queue", "job-1")]
-    assert fake_redis.right_pushes == []
+    assert fake_redis.left_pushes == []
+    assert fake_redis.right_pushes == [("jobs:queue", "job-1")]
     assert place_calls == []
+
+
+def test_tick_marks_job_failed_when_backend_submit_raises(monkeypatch):
+    fake_redis = FakeRedis()
+    submit_calls = []
+    failed_calls = []
+    place_calls = []
+
+    class ExplodingBackend:
+        def submit(self, spec, node_hint=None):
+            submit_calls.append((spec.job_id, node_hint))
+            raise RuntimeError("sbatch failed")
+
+    scheduler = SchedulerStub(nodes=[NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0)])
+    scheduler.backend = ExplodingBackend()
+
+    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_job_spec",
+        lambda job_id: JobSpec(job_id=job_id, image="", cmd=["echo", "hi"], gpus=1),
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "set_job_state",
+        lambda job_id, state, reason=None, exit_code=None: failed_calls.append((job_id, state, reason, exit_code)),
+    )
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
+
+    scheduler.tick()
+
+    assert submit_calls == [("job-1", "node-a")]
+    assert failed_calls == [("job-1", "FAILED", "sbatch failed", None)]
+    assert place_calls == []
+    assert fake_redis.right_pushes == []
+
+
+def test_tick_cancels_backend_job_when_place_job_raises(monkeypatch):
+    fake_redis = FakeRedis()
+    submit_calls = []
+    cancel_calls = []
+    failed_calls = []
+
+    class Backend:
+        def submit(self, spec, node_hint=None):
+            submit_calls.append((spec.job_id, node_hint))
+
+        def cancel(self, job_id):
+            cancel_calls.append(job_id)
+            return True
+
+    scheduler = SchedulerStub(nodes=[NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0)])
+    scheduler.backend = Backend()
+
+    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_job_spec",
+        lambda job_id: JobSpec(job_id=job_id, image="", cmd=["echo", "hi"], gpus=1),
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "place_job",
+        lambda job_id, node_id: (_ for _ in ()).throw(RuntimeError("db write failed")),
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "set_job_state",
+        lambda job_id, state, reason=None, exit_code=None: failed_calls.append((job_id, state, reason, exit_code)),
+    )
+
+    scheduler.tick()
+
+    assert submit_calls == [("job-1", "node-a")]
+    assert cancel_calls == ["job-1"]
+    assert failed_calls == [("job-1", "FAILED", "db write failed", None)]
+
+
+def test_tick_filters_nodes_by_partition_and_state(monkeypatch):
+    fake_redis = FakeRedis()
+    scheduler = SchedulerStub(
+        nodes=[
+            NodeCandidate(
+                node_id="node-a",
+                gpu_count=4,
+                avg_utilization=0.0,
+                partitions=("gpu-v100",),
+                state="idle",
+            ),
+            NodeCandidate(
+                node_id="node-b",
+                gpu_count=4,
+                avg_utilization=0.0,
+                partitions=("gpu-a100",),
+                state="drain",
+            ),
+            NodeCandidate(
+                node_id="node-c",
+                gpu_count=4,
+                avg_utilization=0.0,
+                partitions=("gpu-a100",),
+                state="mixed",
+            ),
+        ]
+    )
+    scheduler.set_active_policy(SchedulerPolicy.FIFO)
+
+    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_job_spec",
+        lambda job_id: JobSpec(
+            job_id=job_id,
+            image="",
+            cmd=["echo", "hi"],
+            gpus=1,
+            metadata={"partition": "gpu-a100"},
+        ),
+    )
+    place_calls = []
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
+
+    scheduler.tick()
+
+    assert fake_redis.right_pushes == [("assign:node-c", "job-1")]
+    assert place_calls == [("job-1", "node-c")]
 
 
 def test_fifo_selects_first_eligible_node_in_sorted_order(monkeypatch):
@@ -112,3 +238,56 @@ def test_binpack_uses_surplus_then_utilization_then_node_id():
     selected = scheduler._select_node(fake_redis, spec, nodes)
 
     assert selected == "node-b"
+
+
+def test_default_partition_from_backend_filters_candidates():
+    scheduler = scheduler_module.NaiveScheduler()
+    scheduler.backend = type("Backend", (), {"default_partition": "gpu-a100"})()
+    spec = JobSpec(job_id="job-1", image="", cmd=["echo"], gpus=1)
+    nodes = [
+        NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0, partitions=("gpu-v100",), state="idle"),
+        NodeCandidate(node_id="node-b", gpu_count=2, avg_utilization=0.0, partitions=("gpu-a100",), state="idle"),
+    ]
+
+    eligible = scheduler._eligible_nodes(spec, nodes)
+
+    assert [node.node_id for node in eligible] == ["node-b"]
+
+
+def test_eligible_nodes_use_allocatable_gpu_count_when_provided():
+    scheduler = scheduler_module.NaiveScheduler()
+    spec = JobSpec(job_id="job-1", image="", cmd=["echo"], gpus=2)
+    nodes = [
+        NodeCandidate(
+            node_id="node-a",
+            gpu_count=4,
+            available_gpu_count=1,
+            avg_utilization=0.0,
+            partitions=(),
+            state="idle",
+        ),
+        NodeCandidate(
+            node_id="node-b",
+            gpu_count=4,
+            available_gpu_count=2,
+            avg_utilization=0.0,
+            partitions=(),
+            state="idle",
+        ),
+    ]
+
+    eligible = scheduler._eligible_nodes(spec, nodes)
+
+    assert [node.node_id for node in eligible] == ["node-b"]
+
+
+def test_structured_state_string_with_drain_flag_is_not_schedulable():
+    node = NodeCandidate(
+        node_id="node-a",
+        gpu_count=4,
+        avg_utilization=0.0,
+        partitions=("gpu",),
+        state="base=idle,flags=['DRAIN']",
+    )
+
+    assert scheduler_module.NaiveScheduler._is_node_schedulable(node) is False
