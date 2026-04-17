@@ -1,4 +1,6 @@
+import os
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -16,7 +18,18 @@ def get_metrics_summary(
     scheduler = getattr(request.app.state, "scheduler", None)
     fresh_node_seconds = scheduler.recent_secs if scheduler is not None else 30
     try:
-        return read_metrics_summary(window_minutes=window_minutes, fresh_node_seconds=fresh_node_seconds)
+        summary = read_metrics_summary(window_minutes=window_minutes, fresh_node_seconds=fresh_node_seconds)
+        backend = getattr(scheduler, "backend", None)
+        if os.getenv("BACKEND", "redis-agent").strip().lower() == "slurm" and backend is not None:
+            nodes = backend.list_nodes(recent_secs=fresh_node_seconds)
+            fresh_cutoff = time.time() - fresh_node_seconds
+            fresh = sum(1 for node in nodes if float(node.last_seen or 0.0) >= fresh_cutoff)
+            summary["nodes"] = {
+                "total": len(nodes),
+                "fresh": fresh,
+                "stale": len(nodes) - fresh,
+            }
+        return summary
     except Exception as exc:
         logger.exception("Failed to build metrics summary")
         raise HTTPException(status_code=500, detail="Failed to fetch metrics summary") from exc
