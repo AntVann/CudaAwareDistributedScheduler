@@ -1,7 +1,8 @@
+import os
 import logging
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from control_plane.api.auth import require_agent, require_user_or_admin
 from control_plane.core.models import NodeInfo
@@ -13,10 +14,15 @@ logger = logging.getLogger("control_plane.api.nodes")
 
 
 @router.get("/nodes", response_model=List[NodeInfo])
-def list_nodes(_authorized=Depends(require_user_or_admin)):
+def list_nodes(request: Request, _authorized=Depends(require_user_or_admin)):
     """
     Return the current known nodes and their latest heartbeat payloads.
     """
+    scheduler = getattr(request.app.state, "scheduler", None)
+    backend = getattr(scheduler, "backend", None)
+    if os.getenv("BACKEND", "redis-agent").strip().lower() == "slurm" and backend is not None:
+        recent_secs = getattr(scheduler, "recent_secs", 30)
+        return backend.list_nodes(recent_secs=recent_secs)
     return persist_list_nodes()
 
 
