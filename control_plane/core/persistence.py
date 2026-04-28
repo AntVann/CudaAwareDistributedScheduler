@@ -68,6 +68,31 @@ CREATE TABLE IF NOT EXISTS scheduler_settings (
   updated_at REAL NOT NULL,
   updated_by TEXT
 );
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE,
+  subject TEXT NOT NULL,
+  role TEXT NOT NULL,
+  projects TEXT NOT NULL DEFAULT '[]',
+  active INTEGER NOT NULL DEFAULT 1,
+  expires_at TEXT,
+  created_at TEXT NOT NULL,
+  created_by TEXT
+);
+
+CREATE TABLE IF NOT EXISTS token_requests (
+  id TEXT PRIMARY KEY,
+  subject_name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  requested_projects TEXT NOT NULL DEFAULT '[]',
+  purpose TEXT NOT NULL,
+  status TEXT NOT NULL,
+  review_notes TEXT,
+  reviewed_by TEXT,
+  created_at TEXT NOT NULL,
+  reviewed_at TEXT
+);
 """
 
 
@@ -190,6 +215,29 @@ def _percentile(values: List[int], pct: float) -> int:
     upper = ordered[high]
     interpolated = lower + (upper - lower) * (rank - low)
     return int(round(interpolated))
+
+
+def _utcnow_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def _parse_iso_dt(value: Any) -> Optional[datetime]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _iso_or_none(value: Any) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
 
 
 def hash_token(plaintext: str) -> str:
@@ -320,6 +368,35 @@ def ensure_bootstrap_admin_token() -> bool:
 
     bootstrap_token = os.getenv("ADMIN_API_TOKEN", "").strip() or os.getenv("OPERATOR_API_TOKEN", "").strip()
 
+    if _use_sqlite():
+        with _sqlite_conn() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM api_tokens WHERE role = ? AND active = 1", ("admin",)).fetchone()
+            admin_count = int(row[0] or 0)
+            if admin_count > 0:
+                return False
+
+            if not bootstrap_token:
+                raise RuntimeError("ADMIN_API_TOKEN is required when no admin token exists")
+
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO api_tokens
+                (id, token_hash, subject, role, projects, active, expires_at, created_at, created_by)
+                VALUES (?, ?, ?, ?, ?, 1, NULL, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    hash_token(bootstrap_token),
+                    "bootstrap-admin",
+                    "admin",
+                    json.dumps(["*"]),
+                    _utcnow_iso(),
+                    "bootstrap",
+                ),
+            )
+            logger.info("Bootstrapped initial admin token from env")
+            return True
+
     with pg_conn() as conn:
         with _cursor(conn) as cur:
             cur.execute("SELECT COUNT(*) FROM api_tokens WHERE role = 'admin' AND active = TRUE")
@@ -351,6 +428,33 @@ def ensure_bootstrap_admin_token() -> bool:
 
 def resolve_human_token(plaintext_token: str) -> Optional[Dict[str, Any]]:
     token_hash = hash_token(plaintext_token)
+    if _use_sqlite():
+        with _sqlite_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id, subject, role, projects, active, expires_at
+                FROM api_tokens
+                WHERE token_hash = ?
+                """,
+                (token_hash,),
+            ).fetchone()
+
+        if row is None or not int(row["active"]):
+            return None
+
+        expires_at = _parse_iso_dt(row["expires_at"])
+        if expires_at is not None and expires_at <= datetime.utcnow():
+            return None
+
+        projects = _json_load(row["projects"], [])
+        return {
+            "token_id": str(row["id"]),
+            "subject": row["subject"],
+            "role": row["role"],
+            "projects": projects,
+            "expires_at": expires_at,
+        }
+
     with pg_conn() as conn:
         with _cursor(conn, cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -507,6 +611,7 @@ def enqueue_job(spec: JobSpec, submitted_by: str | None = None) -> tuple[JobStat
         return (
             JobStatus(
                 state=JobState.QUEUED,
+                project=spec.project,
                 node_id=None,
                 gpu_ids=[],
                 timestamps={"enqueued": enqueued_ts},
@@ -569,7 +674,7 @@ def get_job_status(job_id: str) -> Optional[JobStatus]:
     if _use_sqlite():
         with _sqlite_conn() as conn:
             row = conn.execute(
-                "SELECT status, node_id, gpu_ids, timestamps, exit_code, reason FROM jobs WHERE job_id = ?",
+                "SELECT spec, status, node_id, gpu_ids, timestamps, exit_code, reason FROM jobs WHERE job_id = ?",
                 (job_id,),
             ).fetchone()
         return _to_sqlite_job_status(row) if row else None
@@ -589,6 +694,15 @@ def get_job_status(job_id: str) -> Optional[JobStatus]:
 
 
 def get_job_project(job_id: str) -> Optional[str]:
+    if _use_sqlite():
+        with _sqlite_conn() as conn:
+            row = conn.execute("SELECT spec FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        if not row:
+            return None
+        spec_payload = _json_load(row["spec"], {})
+        project = spec_payload.get("project")
+        return str(project) if project is not None else "default"
+
     with pg_conn() as conn:
         with _cursor(conn) as cur:
             cur.execute("SELECT project FROM jobs WHERE job_id = %s", (job_id,))
@@ -1267,6 +1381,29 @@ def create_token_request(
     purpose: str,
 ) -> Dict[str, Any]:
     request_id = str(uuid.uuid4())
+    if _use_sqlite():
+        created_at = _utcnow_iso()
+        with _sqlite_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO token_requests (id, subject_name, email, requested_projects, purpose, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (request_id, subject_name, email, json.dumps(requested_projects), purpose, "PENDING", created_at),
+            )
+            conn.execute(
+                "INSERT INTO events (ts, job_id, kind, payload) VALUES (?, ?, ?, ?)",
+                (time.time(), None, "token_request_created", json.dumps({"request_id": request_id, "email": email})),
+            )
+        return {
+            "request_id": request_id,
+            "status": "PENDING",
+            "subject_name": subject_name,
+            "email": email,
+            "requested_projects": requested_projects,
+            "purpose": purpose,
+        }
+
     with pg_conn() as conn:
         with _cursor(conn) as cur:
             cur.execute(
@@ -1291,6 +1428,47 @@ def create_token_request(
 
 
 def list_token_requests(status: Optional[str] = None) -> List[Dict[str, Any]]:
+    if _use_sqlite():
+        with _sqlite_conn() as conn:
+            if status:
+                rows = conn.execute(
+                    """
+                    SELECT id, subject_name, email, requested_projects, purpose, status,
+                           review_notes, reviewed_by, created_at, reviewed_at
+                    FROM token_requests
+                    WHERE status = ?
+                    ORDER BY created_at DESC
+                    """,
+                    (status,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, subject_name, email, requested_projects, purpose, status,
+                           review_notes, reviewed_by, created_at, reviewed_at
+                    FROM token_requests
+                    ORDER BY created_at DESC
+                    """
+                ).fetchall()
+
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            result.append(
+                {
+                    "request_id": str(row["id"]),
+                    "subject_name": row["subject_name"],
+                    "email": row["email"],
+                    "requested_projects": _json_load(row["requested_projects"], []),
+                    "purpose": row["purpose"],
+                    "status": row["status"],
+                    "review_notes": row["review_notes"],
+                    "reviewed_by": row["reviewed_by"],
+                    "created_at": _iso_or_none(row["created_at"]),
+                    "reviewed_at": _iso_or_none(row["reviewed_at"]),
+                }
+            )
+        return result
+
     with pg_conn() as conn:
         with _cursor(conn, cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if status:
@@ -1344,9 +1522,86 @@ def approve_token_request(
     review_notes: Optional[str] = None,
     role: str = "user",
     ttl_days: int = 90,
+    delivery_mode: str = "email",
 ) -> Dict[str, Any]:
     if role not in {"user", "admin"}:
         raise ValueError(f"Unsupported role: {role}")
+    if delivery_mode not in {"email", "response"}:
+        raise ValueError(f"Unsupported token delivery mode: {delivery_mode}")
+
+    if _use_sqlite():
+        with _sqlite_conn() as conn:
+            req = conn.execute(
+                """
+                SELECT id, subject_name, email, requested_projects, status
+                FROM token_requests
+                WHERE id = ?
+                """,
+                (request_id,),
+            ).fetchone()
+            if not req:
+                raise KeyError(f"Token request {request_id} not found")
+            if req["status"] != "PENDING":
+                raise ValueError(f"Token request {request_id} is already {req['status']}")
+
+            plaintext_token = generate_token()
+            token_id = str(uuid.uuid4())
+            projects = _json_load(req["requested_projects"], [])
+            expires_at = datetime.utcnow() + timedelta(days=ttl_days)
+            reviewed_at = _utcnow_iso()
+
+            conn.execute(
+                """
+                INSERT INTO api_tokens
+                (id, token_hash, subject, role, projects, active, expires_at, created_at, created_by)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+                """,
+                (
+                    token_id,
+                    hash_token(plaintext_token),
+                    req["subject_name"],
+                    role,
+                    json.dumps(projects),
+                    expires_at.isoformat(),
+                    reviewed_at,
+                    reviewed_by,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE token_requests
+                SET status = ?, review_notes = ?, reviewed_by = ?, reviewed_at = ?
+                WHERE id = ?
+                """,
+                ("APPROVED", review_notes, reviewed_by, reviewed_at, request_id),
+            )
+            conn.execute(
+                "INSERT INTO events (ts, job_id, kind, payload) VALUES (?, ?, ?, ?)",
+                (
+                    time.time(),
+                    None,
+                    "token_request_approved",
+                    json.dumps(
+                        {
+                            "request_id": request_id,
+                            "token_id": token_id,
+                            "reviewed_by": reviewed_by,
+                        }
+                    ),
+                ),
+            )
+            if delivery_mode == "email":
+                deliver(req["email"], req["subject_name"], plaintext_token)
+
+        result = {
+            "request_id": request_id,
+            "status": "APPROVED",
+            "token_id": token_id,
+            "expires_at": expires_at.isoformat(),
+        }
+        if delivery_mode == "response":
+            result["plaintext_token"] = plaintext_token
+        return result
 
     conn = pg_conn()
     conn.autocommit = False
@@ -1415,14 +1670,18 @@ def approve_token_request(
                 ),
             )
 
-        deliver(req["email"], req["subject_name"], plaintext_token)
+        if delivery_mode == "email":
+            deliver(req["email"], req["subject_name"], plaintext_token)
         conn.commit()
-        return {
+        result = {
             "request_id": request_id,
             "status": "APPROVED",
             "token_id": token_id,
             "expires_at": expires_at.isoformat(),
         }
+        if delivery_mode == "response":
+            result["plaintext_token"] = plaintext_token
+        return result
     except Exception:
         conn.rollback()
         raise
@@ -1435,6 +1694,38 @@ def reject_token_request(
     reviewed_by: str,
     review_notes: Optional[str] = None,
 ) -> Dict[str, Any]:
+    if _use_sqlite():
+        reviewed_at = _utcnow_iso()
+        with _sqlite_conn() as conn:
+            row = conn.execute("SELECT status FROM token_requests WHERE id = ?", (request_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"Token request {request_id} not found")
+            if row["status"] != "PENDING":
+                raise ValueError(f"Token request {request_id} is already {row['status']}")
+
+            conn.execute(
+                """
+                UPDATE token_requests
+                SET status = ?, review_notes = ?, reviewed_by = ?, reviewed_at = ?
+                WHERE id = ?
+                """,
+                ("REJECTED", review_notes, reviewed_by, reviewed_at, request_id),
+            )
+            conn.execute(
+                "INSERT INTO events (ts, job_id, kind, payload) VALUES (?, ?, ?, ?)",
+                (
+                    time.time(),
+                    None,
+                    "token_request_rejected",
+                    json.dumps({"request_id": request_id, "reviewed_by": reviewed_by}),
+                ),
+            )
+
+        return {
+            "request_id": request_id,
+            "status": "REJECTED",
+        }
+
     with pg_conn() as conn:
         with _cursor(conn) as cur:
             cur.execute(
@@ -1472,6 +1763,32 @@ def reject_token_request(
 
 
 def list_api_tokens() -> List[Dict[str, Any]]:
+    if _use_sqlite():
+        with _sqlite_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, subject, role, projects, active, expires_at, created_at, created_by
+                FROM api_tokens
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+
+        tokens: List[Dict[str, Any]] = []
+        for row in rows:
+            tokens.append(
+                {
+                    "token_id": str(row["id"]),
+                    "subject": row["subject"],
+                    "role": row["role"],
+                    "projects": _json_load(row["projects"], []),
+                    "active": bool(row["active"]),
+                    "expires_at": _iso_or_none(row["expires_at"]),
+                    "created_at": _iso_or_none(row["created_at"]),
+                    "created_by": row["created_by"],
+                }
+            )
+        return tokens
+
     with pg_conn() as conn:
         with _cursor(conn, cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -1504,6 +1821,22 @@ def list_api_tokens() -> List[Dict[str, Any]]:
 
 
 def revoke_api_token(token_id: str, revoked_by: str) -> Dict[str, Any]:
+    if _use_sqlite():
+        with _sqlite_conn() as conn:
+            cur = conn.execute("UPDATE api_tokens SET active = 0 WHERE id = ?", (token_id,))
+            if cur.rowcount == 0:
+                raise KeyError(f"Token {token_id} not found")
+            conn.execute(
+                "INSERT INTO events (ts, job_id, kind, payload) VALUES (?, ?, ?, ?)",
+                (
+                    time.time(),
+                    None,
+                    "token_revoked",
+                    json.dumps({"token_id": token_id, "revoked_by": revoked_by}),
+                ),
+            )
+        return {"token_id": token_id, "revoked": True}
+
     with pg_conn() as conn:
         with _cursor(conn) as cur:
             cur.execute(

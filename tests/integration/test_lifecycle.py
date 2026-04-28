@@ -7,6 +7,7 @@ import requests
 API_BASE = os.getenv("OVERLAY_API_BASE", "http://localhost:8000")
 ADMIN_TOKEN = os.getenv("OVERLAY_ADMIN_TOKEN", "local-operator-token")
 AGENT_TOKEN = os.getenv("OVERLAY_AGENT_TOKEN", "local-agent-token")
+TOKEN_DELIVERY_MODE = os.getenv("OVERLAY_TOKEN_DELIVERY_MODE", "email")
 
 pytestmark = pytest.mark.integration
 
@@ -63,6 +64,8 @@ def _approve_token_request(request_id: str) -> dict:
     payload = response.json()
     assert payload["status"] == "APPROVED"
     assert payload["token_id"]
+    if TOKEN_DELIVERY_MODE == "response":
+        assert payload["plaintext_token"]
     return payload
 
 

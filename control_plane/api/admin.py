@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +18,13 @@ from control_plane.core.persistence import (
 
 router = APIRouter(tags=["admin"])
 logger = logging.getLogger("control_plane.api.admin")
+
+
+def _token_delivery_mode() -> str:
+    mode = os.getenv("TOKEN_DELIVERY_MODE", "email").strip().lower()
+    if mode not in {"email", "response"}:
+        raise RuntimeError("TOKEN_DELIVERY_MODE must be 'email' or 'response'")
+    return mode
 
 
 class StateReq(BaseModel):
@@ -74,6 +82,7 @@ def approve_request(
     principal: AuthPrincipal = Depends(require_admin),
 ):
     try:
+        delivery_mode = _token_delivery_mode()
         return approve_token_request(
             request_id=request_id,
             reviewed_by=principal.subject,
@@ -81,6 +90,7 @@ def approve_request(
             role="user",
             ttl_days=90,
             deliver=send_token_email,
+            delivery_mode=delivery_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

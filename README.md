@@ -39,6 +39,7 @@ The `ExecutionBackend` abstraction allows the same API to work against SLURM on 
 - Public liveness endpoints remain open: `/health`, `/ready`, `/version`
 
 See `docs/milestone-8.1-auth.md` for full flow and API details.
+For the latest branch-specific HPC auth runbook, including SQLite token mode and response-mode approval, see `docs/milestone-8.1-auth.md`.
 
 ## Project Structure
 
@@ -103,10 +104,11 @@ export BACKEND=slurm
 export DATABASE_URL="sqlite:////home/<your-id>/scheduler.db"
 export QUEUE_BACKEND=memory
 export AUTH_MODE=token
-export OPERATOR_API_TOKEN="replace-with-operator-token"
+export ADMIN_API_TOKEN="replace-with-operator-token"
 export AGENT_API_TOKEN="replace-with-agent-token"
 export CONTROL_PLANE_CALLBACK_URL="http://<login-node>:8000"
 export SLURM_POLL_INTERVAL_SECS=10
+export TOKEN_DELIVERY_MODE="response"
 
 cd ~/CudaAwareDistributedScheduler
 python3 -m uvicorn control_plane.app:app --host 0.0.0.0 --port 8000
@@ -132,8 +134,9 @@ curl -X POST http://<login-node>:8000/api/jobs \
   -H "Content-Type: application/json" \
   -d '{
     "job_id": "test-001",
+    "project": "default",
     "image": "",
-    "cmd": ["nvidia-smi"],
+    "cmd": ["sh", "-c", "sleep 5; hostname"],
     "gpus": 1,
     "metadata": {"partition": "gpuqs"}
   }'
@@ -181,11 +184,13 @@ Open `http://localhost:5173` in your browser to see the dashboard.
 | `CONTROL_PLANE_CALLBACK_URL` | `http://127.0.0.1:8000` | URL compute nodes use to call back to the control plane |
 | `AGENT_API_TOKEN` | — | Token for agent-scope auth on callbacks |
 | `ADMIN_API_TOKEN` | — | Bootstrap admin token when `AUTH_MODE=token` (fallback: `OPERATOR_API_TOKEN`) |
+| `TOKEN_DELIVERY_MODE` | `email` | Token approval delivery mode: `email` or `response` |
 | `AUTH_MODE` | `none` | `none` for trusted HPC, `token` for role/project auth |
 
 ### SJSU-style demo flow
 
 If you want a copy-pasteable HPC demo sequence, see `docs/project-demo.md`.
+If you want the auth branch runbook, including token request approval without SMTP on HPC, see `docs/milestone-8.1-auth.md`.
 
 ## Quick Start: Local Development (Docker)
 

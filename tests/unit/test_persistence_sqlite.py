@@ -19,8 +19,10 @@ def test_sqlite_enqueue_and_state_flow(monkeypatch, tmp_path):
 
     assert created is True
     assert status.state == JobState.QUEUED
+    assert status.project == "default"
     assert persistence.redis_client().llen("jobs:queue") == 1
     assert persistence.get_job_spec("job-1") is not None
+    assert persistence.get_job_project("job-1") == "default"
 
     persistence.place_job("job-1", "node-a")
     persistence.store_backend_ref("job-1", "12345")
@@ -32,6 +34,7 @@ def test_sqlite_enqueue_and_state_flow(monkeypatch, tmp_path):
     assert final is not None
     assert final.state == JobState.DONE
     assert final.exit_code == 0
+    assert final.project == "default"
 
     jobs = persistence.list_jobs()
     assert len(jobs) == 1
@@ -73,3 +76,182 @@ def test_sqlite_metrics_summary(monkeypatch, tmp_path):
     assert summary["jobs"]["done"] == 1
     assert summary["nodes"]["total"] == 1
     assert summary["windowed_terminal_counts"]["done"] == 1
+
+
+def test_sqlite_bootstrap_admin_token_and_resolve(monkeypatch, tmp_path):
+    _configure_sqlite(monkeypatch, tmp_path)
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("ADMIN_API_TOKEN", "sqlite-admin-token")
+
+    created = persistence.ensure_bootstrap_admin_token()
+
+    assert created is True
+    principal = persistence.resolve_human_token("sqlite-admin-token")
+    assert principal is not None
+    assert principal["subject"] == "bootstrap-admin"
+    assert principal["role"] == "admin"
+    assert principal["projects"] == ["*"]
+
+
+def test_sqlite_resolve_human_token_rejects_expired_token(monkeypatch, tmp_path):
+    _configure_sqlite(monkeypatch, tmp_path)
+
+    with persistence._sqlite_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO api_tokens
+            (id, token_hash, subject, role, projects, active, expires_at, created_at, created_by)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+            """,
+            (
+                "tok-expired",
+                persistence.hash_token("expired-token"),
+                "alice",
+                "user",
+                '["default"]',
+                "2000-01-01T00:00:00",
+                "2000-01-01T00:00:00",
+                "test",
+            ),
+        )
+
+    assert persistence.resolve_human_token("expired-token") is None
+
+
+def test_sqlite_token_request_full_flow(monkeypatch, tmp_path):
+    _configure_sqlite(monkeypatch, tmp_path)
+
+    created = persistence.create_token_request(
+        subject_name="alice",
+        email="alice@example.com",
+        requested_projects=["vision", "nlp"],
+        purpose="demo access",
+    )
+    assert created["status"] == "PENDING"
+
+    pending = persistence.list_token_requests(status="PENDING")
+    assert len(pending) == 1
+    assert pending[0]["requested_projects"] == ["vision", "nlp"]
+
+    delivered = {}
+
+    def fake_deliver(email: str, subject_name: str, token: str) -> None:
+        delivered["email"] = email
+        delivered["subject_name"] = subject_name
+        delivered["token"] = token
+
+    approved = persistence.approve_token_request(
+        created["request_id"],
+        reviewed_by="admin-user",
+        deliver=fake_deliver,
+        review_notes="approved",
+    )
+
+    assert approved["status"] == "APPROVED"
+    assert delivered["email"] == "alice@example.com"
+
+    principal = persistence.resolve_human_token(delivered["token"])
+    assert principal is not None
+    assert principal["subject"] == "alice"
+    assert principal["role"] == "user"
+    assert principal["projects"] == ["vision", "nlp"]
+
+    tokens = persistence.list_api_tokens()
+    assert len(tokens) == 1
+    assert tokens[0]["subject"] == "alice"
+    assert tokens[0]["active"] is True
+
+
+def test_sqlite_approve_token_request_rolls_back_on_delivery_failure(monkeypatch, tmp_path):
+    _configure_sqlite(monkeypatch, tmp_path)
+
+    created = persistence.create_token_request(
+        subject_name="bob",
+        email="bob@example.com",
+        requested_projects=["default"],
+        purpose="demo access",
+    )
+
+    def broken_deliver(email: str, subject_name: str, token: str) -> None:
+        raise RuntimeError("smtp failed")
+
+    try:
+        persistence.approve_token_request(
+            created["request_id"],
+            reviewed_by="admin-user",
+            deliver=broken_deliver,
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "smtp failed"
+    else:
+        raise AssertionError("approve_token_request should have raised")
+
+    pending = persistence.list_token_requests(status="PENDING")
+    assert len(pending) == 1
+    assert pending[0]["request_id"] == created["request_id"]
+    assert persistence.list_api_tokens() == []
+
+
+def test_sqlite_approve_token_request_response_mode_returns_plaintext_token(monkeypatch, tmp_path):
+    _configure_sqlite(monkeypatch, tmp_path)
+
+    created = persistence.create_token_request(
+        subject_name="erin",
+        email="erin@example.com",
+        requested_projects=["default"],
+        purpose="hpc access",
+    )
+    delivered = {"called": False}
+
+    def fake_deliver(email: str, subject_name: str, token: str) -> None:
+        delivered["called"] = True
+
+    approved = persistence.approve_token_request(
+        created["request_id"],
+        reviewed_by="admin-user",
+        deliver=fake_deliver,
+        delivery_mode="response",
+    )
+
+    assert approved["status"] == "APPROVED"
+    assert approved["plaintext_token"]
+    assert delivered["called"] is False
+
+    principal = persistence.resolve_human_token(approved["plaintext_token"])
+    assert principal is not None
+    assert principal["subject"] == "erin"
+    assert principal["projects"] == ["default"]
+
+
+def test_sqlite_reject_and_revoke_token_request(monkeypatch, tmp_path):
+    _configure_sqlite(monkeypatch, tmp_path)
+
+    rejected = persistence.create_token_request(
+        subject_name="carol",
+        email="carol@example.com",
+        requested_projects=["default"],
+        purpose="should be rejected",
+    )
+    result = persistence.reject_token_request(rejected["request_id"], reviewed_by="admin-user", review_notes="no")
+    assert result["status"] == "REJECTED"
+
+    approved = persistence.create_token_request(
+        subject_name="dave",
+        email="dave@example.com",
+        requested_projects=["default"],
+        purpose="demo access",
+    )
+    delivered = {}
+
+    def fake_deliver(email: str, subject_name: str, token: str) -> None:
+        delivered["token"] = token
+
+    token_result = persistence.approve_token_request(
+        approved["request_id"],
+        reviewed_by="admin-user",
+        deliver=fake_deliver,
+    )
+    revoked = persistence.revoke_api_token(token_result["token_id"], revoked_by="admin-user")
+
+    assert revoked == {"token_id": token_result["token_id"], "revoked": True}
+    assert persistence.resolve_human_token(delivered["token"]) is None
