@@ -30,7 +30,7 @@ const PARTITION_OPTIONS = [
 ];
 
 export default function Jobs() {
-  const { token } = useOperatorAuth();
+  const { token, me, loadingMe } = useOperatorAuth();
   const [jobs, setJobs] = useState<JobListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -39,6 +39,7 @@ export default function Jobs() {
 
   // Submit form state
   const [showSubmit, setShowSubmit] = useState(false);
+  const [project, setProject] = useState("");
   const [cmd, setCmd] = useState('["echo", "hello"]');
   const [gpus, setGpus] = useState(1);
   const [partition, setPartition] = useState("");
@@ -48,8 +49,14 @@ export default function Jobs() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadJobs = useCallback(async () => {
+    if (!token) {
+      setJobs([]);
+      setError("Enter a valid token to load jobs.");
+      setLoading(false);
+      return;
+    }
     try {
-      const data = await fetchJobs();
+      const data = await fetchJobs(token);
       setJobs(data);
       setError(null);
     } catch (err) {
@@ -57,11 +64,24 @@ export default function Jobs() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [token]);
 
   useEffect(() => {
     void loadJobs();
   }, [loadJobs]);
+
+  useEffect(() => {
+    if (!me) return;
+    if (me.role === "user") {
+      if (me.projects.length === 0) {
+        setProject("");
+        return;
+      }
+      setProject((prev) => (me.projects.includes(prev) ? prev : me.projects[0]));
+      return;
+    }
+    setProject((prev) => prev || "default");
+  }, [me]);
 
   useEffect(() => {
     if (autoRefresh) {
@@ -86,6 +106,7 @@ export default function Jobs() {
       }
       const res: EnqueueResponse = await submitJob({
         job_id: jobId,
+        project: project.trim(),
         image: "",
         cmd: parsedCmd,
         gpus,
@@ -136,10 +157,38 @@ export default function Jobs() {
         <Card>
           <h3 className="text-sm font-medium text-text-secondary mb-3">Submit a Test Job</h3>
           <p className="mb-3 text-xs text-text-muted">
-            This action requires the operator token stored in the sidebar.
+            This action requires a valid user/admin token stored in the sidebar.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
             <div>
+              <label className="block text-xs text-text-muted mb-1">Project</label>
+              {me?.role === "user" ? (
+                <select
+                  value={project}
+                  onChange={(e) => setProject(e.target.value)}
+                  disabled={loadingMe || me.projects.length === 0}
+                  className="mb-3 w-full rounded-md border border-border bg-surface-0 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent disabled:opacity-60"
+                >
+                  {me.projects.length === 0 ? (
+                    <option value="">
+                      {loadingMe ? "Loading allowed projects..." : "No allowed projects assigned"}
+                    </option>
+                  ) : (
+                    me.projects.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))
+                  )}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={project}
+                  onChange={(e) => setProject(e.target.value)}
+                  className="mb-3 w-full rounded-md border border-border bg-surface-0 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent"
+                />
+              )}
               <label className="block text-xs text-text-muted mb-1">Command (JSON array)</label>
               <input
                 type="text"
@@ -179,7 +228,7 @@ export default function Jobs() {
           <div className="flex items-center gap-3">
             <button
               onClick={handleSubmit}
-              disabled={submitting || !token}
+              disabled={submitting || !token || !project.trim()}
               className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50 transition-colors"
             >
               {submitting ? "Submitting..." : token ? "Submit" : "Token Required"}
@@ -214,6 +263,7 @@ export default function Jobs() {
                 <th className="px-4 py-2.5 font-medium">Job ID</th>
                 <th className="px-4 py-2.5 font-medium">SLURM ID</th>
                 <th className="px-4 py-2.5 font-medium">State</th>
+                <th className="px-4 py-2.5 font-medium">Project</th>
                 <th className="px-4 py-2.5 font-medium">Node</th>
                 <th className="px-4 py-2.5 font-medium">Exit Code</th>
                 <th className="px-4 py-2.5 font-medium">Reason</th>
@@ -235,6 +285,9 @@ export default function Jobs() {
                       <StatusBadge state={job.state} />
                     </td>
                     <td className="px-4 py-2.5 font-mono text-xs text-text-secondary">
+                      {job.project}
+                    </td>
+                    <td className="px-4 py-2.5 font-mono text-xs text-text-secondary">
                       {job.node_id ?? "-"}
                     </td>
                     <td className="px-4 py-2.5 font-mono text-xs text-text-secondary">
@@ -249,7 +302,7 @@ export default function Jobs() {
                   </tr>
                   {expandedId === job.job_id && (
                     <tr className="border-b border-border bg-surface-2/30">
-                      <td colSpan={7} className="px-6 py-4">
+                      <td colSpan={8} className="px-6 py-4">
                         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
                           <div>
                             <span className="text-text-muted">GPU IDs:</span>{" "}

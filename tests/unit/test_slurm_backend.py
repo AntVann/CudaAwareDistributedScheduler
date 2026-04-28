@@ -24,7 +24,7 @@ def test_submit_stores_backend_ref(monkeypatch, tmp_path):
     monkeypatch.setattr("control_plane.core.backends.slurm.subprocess.run", fake_run)
     monkeypatch.setattr("control_plane.core.backends.slurm.store_backend_ref", fake_store)
 
-    spec = JobSpec(job_id="job-1", image="", cmd=["echo", "hello"], gpus=1)
+    spec = JobSpec(job_id="job-1", project="default", image="", cmd=["echo", "hello"], gpus=1)
     result = backend.submit(spec, node_hint="node-a")
 
     assert result == "4242"
@@ -41,7 +41,7 @@ def test_submit_raises_on_sbatch_error(monkeypatch, tmp_path):
 
     monkeypatch.setattr("control_plane.core.backends.slurm.subprocess.run", fake_run)
 
-    spec = JobSpec(job_id="job-1", image="", cmd=["echo", "hello"], gpus=1)
+    spec = JobSpec(job_id="job-1", project="default", image="", cmd=["echo", "hello"], gpus=1)
     with pytest.raises(SlurmSubmitError):
         backend.submit(spec)
 
@@ -221,7 +221,7 @@ def test_parse_slurm_time_rejects_short_numeric_values():
 
 def test_generate_batch_script_captures_exit_code_even_on_failure():
     backend = SlurmBackend()
-    spec = JobSpec(job_id="job-1", image="", cmd=["false"], gpus=1)
+    spec = JobSpec(job_id="job-1", project="default", image="", cmd=["false"], gpus=1)
     script = backend._generate_batch_script(spec, node_hint=None)
     lines = script.splitlines()
     idx_set_plus_e = lines.index("set +e")

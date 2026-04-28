@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from control_plane.api.auth import AuthPrincipal
 from control_plane.api import metrics as metrics_api
 from control_plane.core.models import NodeInfo
 
@@ -9,7 +10,7 @@ def test_metrics_endpoint_overrides_node_counts_with_live_slurm_view(monkeypatch
     monkeypatch.setattr(
         metrics_api,
         "read_metrics_summary",
-        lambda window_minutes, fresh_node_seconds: {
+        lambda window_minutes, fresh_node_seconds, is_admin, projects: {
             "queue_depth": 0,
             "jobs": {
                 "queued": 0,
@@ -39,8 +40,15 @@ def test_metrics_endpoint_overrides_node_counts_with_live_slurm_view(monkeypatch
     backend = SimpleNamespace(list_nodes=lambda recent_secs: live_nodes)
     scheduler = SimpleNamespace(backend=backend, recent_secs=30)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(scheduler=scheduler)))
+    principal = AuthPrincipal(
+        token_id="token-1",
+        subject="tester",
+        role="admin",
+        projects=["*"],
+        expires_at=None,
+    )
 
-    summary = metrics_api.get_metrics_summary(request, window_minutes=15)
+    summary = metrics_api.get_metrics_summary(request, window_minutes=15, principal=principal)
 
     assert summary["nodes"] == {"total": 2, "fresh": 1, "stale": 1}
     assert summary["window_minutes"] == 15

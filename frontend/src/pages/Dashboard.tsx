@@ -44,12 +44,13 @@ export default function Dashboard() {
 
     async function load() {
       try {
-        const [healthResponse, readyResponse, metricsResponse, policiesResponse] = await Promise.all([
+        const [healthResponse, readyResponse] = await Promise.all([
           fetchHealth(),
           fetchReady(),
-          fetchMetricsSummary(),
-          fetchPolicies(),
         ]);
+        const [metricsResponse, policiesResponse] = token
+          ? await Promise.all([fetchMetricsSummary(60, token), fetchPolicies(token)])
+          : [null, null];
         if (!cancelled) {
           setHealth(healthResponse);
           setReady(readyResponse);
@@ -70,11 +71,11 @@ export default function Dashboard() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [token]);
 
   async function handlePolicyChange(nextPolicy: string) {
     if (!token) {
-      setPolicyError("Enter the operator token to change the active policy.");
+      setPolicyError("Enter an admin token to change the active policy.");
       setPolicyStatus(null);
       return;
     }
@@ -94,6 +95,7 @@ export default function Dashboard() {
   }
 
   const summary = metrics?.jobs;
+  const requiresToken = !token;
 
   return (
     <div className="max-w-6xl space-y-6">
@@ -102,6 +104,11 @@ export default function Dashboard() {
       {error ? (
         <div className="rounded-md border border-state-failed/30 bg-state-failed/10 px-4 py-3 text-sm text-state-failed">
           {error}
+        </div>
+      ) : null}
+      {requiresToken ? (
+        <div className="rounded-md border border-accent/20 bg-accent/10 px-4 py-3 text-sm text-text-secondary">
+          Enter a valid user/admin token to view jobs, metrics, nodes, and policy data.
         </div>
       ) : null}
 
@@ -236,10 +243,10 @@ export default function Dashboard() {
             <div>
               <p className="text-sm text-text-secondary">Scheduling Policy</p>
               <p className="text-xs text-text-muted">
-                Active: <span className="font-mono text-text-primary">{policies?.active ?? "Loading..."}</span>
+                Active: <span className="font-mono text-text-primary">{policies?.active ?? "-"}</span>
               </p>
             </div>
-            <span className="text-xs text-text-muted">{token ? "Operator token set" : "Read-only mode"}</span>
+            <span className="text-xs text-text-muted">{token ? "API token set" : "Read-only mode"}</span>
           </div>
           <div className="flex flex-wrap gap-2">
             {policies?.supported.map((policy) => (
@@ -247,9 +254,9 @@ export default function Dashboard() {
                 key={policy}
                 type="button"
                 onClick={() => handlePolicyChange(policy)}
-                disabled={updatingPolicy || policies.active === policy}
+                disabled={updatingPolicy || !policies || policies.active === policy}
                 className={`rounded-md border px-3 py-2 text-xs font-medium transition-colors ${
-                  policies.active === policy
+                  policies?.active === policy
                     ? "border-accent bg-accent/10 text-accent"
                     : "border-border bg-surface-0 text-text-secondary hover:border-accent/40 hover:text-text-primary"
                 } disabled:cursor-not-allowed disabled:opacity-60`}

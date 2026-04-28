@@ -8,6 +8,7 @@ A GPU-aware job scheduler that runs on top of SLURM. It provides a REST API and 
 - Runtime-selectable scheduling policies: `FIFO`, `ROUND_ROBIN`, `BINPACK`
 - Background poller that tracks SLURM job state transitions
 - React/Vite admin dashboard with real-time job and node views
+- Token-based auth/authz with admin/user/agent roles and project-scoped access
 - Also runs locally via Docker Compose with Redis + Postgres for development
 
 ## Architecture
@@ -26,6 +27,19 @@ SLURM    Redis+Agent
 ```
 
 The `ExecutionBackend` abstraction allows the same API to work against SLURM on HPC or Redis+Agent workers in Docker for local development.
+
+## Auth/Authz (Milestone 8.1)
+
+- Human roles: `admin`, `user`
+- Internal role: `agent` (heartbeat/state-update only)
+- `POST /api/jobs` requires `project`
+- Non-admin users can only submit/read jobs for allowed projects
+- Public token request endpoint: `POST /api/token-requests`
+- Admin review endpoints: `/api/admin/token-requests/*`
+- Public liveness endpoints remain open: `/health`, `/ready`, `/version`
+
+See `docs/milestone-8.1-auth.md` for full flow and API details.
+For the latest branch-specific HPC auth runbook, including SQLite token mode and response-mode approval, see `docs/milestone-8.1-auth.md`.
 
 ## Project Structure
 
@@ -90,10 +104,11 @@ export BACKEND=slurm
 export DATABASE_URL="sqlite:////home/<your-id>/scheduler.db"
 export QUEUE_BACKEND=memory
 export AUTH_MODE=token
-export OPERATOR_API_TOKEN="replace-with-operator-token"
+export ADMIN_API_TOKEN="replace-with-operator-token"
 export AGENT_API_TOKEN="replace-with-agent-token"
 export CONTROL_PLANE_CALLBACK_URL="http://<login-node>:8000"
 export SLURM_POLL_INTERVAL_SECS=10
+export TOKEN_DELIVERY_MODE="response"
 
 cd ~/CudaAwareDistributedScheduler
 python3 -m uvicorn control_plane.app:app --host 0.0.0.0 --port 8000
@@ -119,8 +134,9 @@ curl -X POST http://<login-node>:8000/api/jobs \
   -H "Content-Type: application/json" \
   -d '{
     "job_id": "test-001",
+    "project": "default",
     "image": "",
-    "cmd": ["nvidia-smi"],
+    "cmd": ["sh", "-c", "sleep 5; hostname"],
     "gpus": 1,
     "metadata": {"partition": "gpuqs"}
   }'
@@ -167,11 +183,14 @@ Open `http://localhost:5173` in your browser to see the dashboard.
 | `SLURM_SCRIPT_DIR` | `/tmp/scheduler-scripts` | Where generated sbatch scripts are stored |
 | `CONTROL_PLANE_CALLBACK_URL` | `http://127.0.0.1:8000` | URL compute nodes use to call back to the control plane |
 | `AGENT_API_TOKEN` | — | Token for agent-scope auth on callbacks |
-| `OPERATOR_API_TOKEN` | — | Token for operator-scope auth |
+| `ADMIN_API_TOKEN` | — | Bootstrap admin token when `AUTH_MODE=token` (fallback: `OPERATOR_API_TOKEN`) |
+| `TOKEN_DELIVERY_MODE` | `email` | Token approval delivery mode: `email` or `response` |
+| `AUTH_MODE` | `none` | `none` for trusted HPC, `token` for role/project auth |
 
 ### SJSU-style demo flow
 
-If you want a copy-pasteable HPC demo sequence, see [docs/project-demo.md](/Users/serhatgundem/Projects/CudaAwareDistributedScheduler/docs/project-demo.md).
+If you want a copy-pasteable HPC demo sequence, see `docs/project-demo.md`.
+If you want the auth branch runbook, including token request approval without SMTP on HPC, see `docs/milestone-8.1-auth.md`.
 
 ## Quick Start: Local Development (Docker)
 
@@ -187,6 +206,9 @@ For local development and testing without an HPC cluster.
 ### 1. Start the stack
 
 ```bash
+# Optional: configure real SMTP for token delivery
+cp .env.example .env
+
 make up
 ```
 
@@ -196,7 +218,9 @@ This starts the control plane, two agent workers, Redis, and Postgres.
 
 ```bash
 curl http://localhost:8000/health
-curl http://localhost:8000/api/nodes
+curl http://localhost:8000/ready
+curl http://localhost:8000/version
+curl -H "Authorization: Bearer local-operator-token" http://localhost:8000/api/nodes
 ```
 
 ### 3. Start the frontend
@@ -216,7 +240,7 @@ From the UI, click **Submit Test Job**, or via API:
 curl -X POST http://localhost:8000/api/jobs \
   -H "Authorization: Bearer local-operator-token" \
   -H "Content-Type: application/json" \
-  -d '{"job_id":"demo-1","image":"","cmd":["echo","hello"]}'
+  -d '{"job_id":"demo-1","project":"default","image":"","cmd":["echo","hello"]}'
 ```
 
 Watch the job move through `QUEUED -> PLACED -> RUNNING -> DONE` in the Jobs page.
@@ -256,6 +280,7 @@ make down
 ```json
 {
   "job_id": "my-job",
+  "project": "default",
   "image": "",
   "cmd": ["nvidia-smi"],
   "gpus": 1,

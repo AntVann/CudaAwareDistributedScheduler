@@ -33,20 +33,20 @@ class FakeCursor:
     def execute(self, sql, params):
         normalized = " ".join(sql.split())
 
-        if normalized.startswith("INSERT INTO jobs"):
-            job_id, _spec_json, status, timestamps_json = params
+        if normalized.startswith("INSERT INTO jobs (job_id, project, submitted_by, spec, status, timestamps)"):
+            job_id, project, _submitted_by, _spec_json, status, timestamps_json = params
             if job_id in self.db:
                 self._fetchone = None
                 self.rowcount = 0
                 return
 
-            row = (status, None, [], json.loads(timestamps_json), None, None)
+            row = (status, None, [], json.loads(timestamps_json), None, None, project)
             self.db[job_id] = row
             self._fetchone = row
             self.rowcount = 1
             return
 
-        if normalized.startswith("SELECT status, node_id, gpu_ids, timestamps, exit_code, reason FROM jobs"):
+        if normalized.startswith("SELECT status, node_id, gpu_ids, timestamps, exit_code, reason, project FROM jobs"):
             job_id = params[0]
             self._fetchone = self.db.get(job_id)
             self.rowcount = 1 if self._fetchone else 0
@@ -59,10 +59,10 @@ class FakeCursor:
                 self.rowcount = 0
                 return
 
-            _old_state, node_id, gpu_ids, timestamps, _old_exit_code, _old_reason = existing
+            _old_state, node_id, gpu_ids, timestamps, _old_exit_code, _old_reason, project = existing
             merged_timestamps = dict(timestamps or {})
             merged_timestamps.update(json.loads(ts_json))
-            self.db[job_id] = (state, node_id, gpu_ids, merged_timestamps, exit_code, reason)
+            self.db[job_id] = (state, node_id, gpu_ids, merged_timestamps, exit_code, reason, project)
             self.rowcount = 1
             return
 
@@ -92,43 +92,49 @@ def test_enqueue_job_creates_new_queue_entry(monkeypatch):
     monkeypatch.setattr(persistence, "pg_conn", lambda: FakeConnection(db))
     monkeypatch.setattr(persistence, "redis_client", lambda: fake_redis)
 
-    status, created = persistence.enqueue_job(JobSpec(job_id="job-1", image="", cmd=["echo", "hi"]))
+    status, created = persistence.enqueue_job(
+        JobSpec(job_id="job-1", project="vision", image="", cmd=["echo", "hi"]),
+        submitted_by="alice",
+    )
 
     assert created is True
     assert status.state.value == "QUEUED"
+    assert status.project == "vision"
     assert fake_redis.rpush_calls == [("jobs:queue", "job-1")]
     assert len(fake_redis.set_calls) == 1
 
 
 def test_enqueue_job_duplicate_is_idempotent(monkeypatch):
     db = {
-        "job-1": ("DONE", "node-a", [], {"enqueued": 1.0, "done": 2.0}, 0, None),
+        "job-1": ("DONE", "node-a", [], {"enqueued": 1.0, "done": 2.0}, 0, None, "vision"),
     }
     fake_redis = FakeRedis()
     monkeypatch.setattr(persistence, "pg_conn", lambda: FakeConnection(db))
     monkeypatch.setattr(persistence, "redis_client", lambda: fake_redis)
 
-    status, created = persistence.enqueue_job(JobSpec(job_id="job-1", image="", cmd=["echo", "changed"]))
+    status, created = persistence.enqueue_job(JobSpec(job_id="job-1", project="vision", image="", cmd=["echo", "changed"]))
 
     assert created is False
     assert status.state.value == "DONE"
     assert status.node_id == "node-a"
+    assert status.project == "vision"
     assert fake_redis.rpush_calls == []
     assert fake_redis.set_calls == []
 
 
 def test_set_job_state_updates_reason_and_timestamp(monkeypatch):
     db = {
-        "job-1": ("RUNNING", "node-a", [], {"running": 1.0}, None, None),
+        "job-1": ("RUNNING", "node-a", [], {"running": 1.0}, None, None, "vision"),
     }
     monkeypatch.setattr(persistence, "pg_conn", lambda: FakeConnection(db))
 
     persistence.set_job_state("job-1", "FAILED", exit_code=127, reason="apptainer missing")
 
-    state, _node_id, _gpu_ids, timestamps, exit_code, reason = db["job-1"]
+    state, _node_id, _gpu_ids, timestamps, exit_code, reason, project = db["job-1"]
     assert state == "FAILED"
     assert exit_code == 127
     assert reason == "apptainer missing"
+    assert project == "vision"
     assert "failed" in timestamps
 
 

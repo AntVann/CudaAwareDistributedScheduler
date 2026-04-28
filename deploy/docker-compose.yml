@@ -26,8 +26,17 @@ services:
     environment:
       APP_VERSION: "0.8.0-m8"
       AUTH_MODE: "token"
+      ADMIN_API_TOKEN: "local-operator-token"
       OPERATOR_API_TOKEN: "local-operator-token"
       AGENT_API_TOKEN: "local-agent-token"
+      SMTP_HOST: "${SMTP_HOST:-smtp.gmail.com}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USER: "${SMTP_USER:-ronakmalkan@gmail.com}"
+      SMTP_PASS: "${SMTP_PASS:-}"
+      SMTP_FROM: "${SMTP_FROM:-ronakmalkan@gmail.com}"
+      SMTP_STARTTLS: "${SMTP_STARTTLS:-true}"
+      TOKEN_REQUEST_RATE_LIMIT: "100"
+      TOKEN_REQUEST_RATE_WINDOW_SECS: "600"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: overlay

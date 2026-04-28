@@ -2,6 +2,11 @@
 
 This is a concrete end-to-end demo flow for running the app on an SJSU-style SLURM cluster from a terminal.
 
+This document now includes two valid demo paths:
+
+1. operator/admin token demo
+2. response-mode user token demo for HPC environments where SMTP is unavailable
+
 Replace these placeholders before running commands:
 
 - `<your-id>`: your SJSU/HPC username
@@ -9,6 +14,7 @@ Replace these placeholders before running commands:
 - `<login-node>`: the hostname where you run the control plane
 - `<operator-token>`: bearer token used for operator API calls
 - `<agent-token>`: bearer token used by SLURM job callbacks
+- `<user-token>`: bearer token returned from admin approval when `TOKEN_DELIVERY_MODE=response`
 
 ## 1. SSH to the cluster
 
@@ -52,11 +58,12 @@ export BACKEND=slurm
 export DATABASE_URL="sqlite:////home/<your-id>/scheduler.db"
 export QUEUE_BACKEND=memory
 export AUTH_MODE=token
-export OPERATOR_API_TOKEN="<operator-token>"
+export ADMIN_API_TOKEN="<operator-token>"
 export AGENT_API_TOKEN="<agent-token>"
 export CONTROL_PLANE_CALLBACK_URL="http://<login-node>:8000"
 export SLURM_DEFAULT_PARTITION="gpuqs"
 export SLURM_POLL_INTERVAL_SECS=10
+export TOKEN_DELIVERY_MODE="response"
 
 python3 -m uvicorn control_plane.app:app --host 0.0.0.0 --port 8000
 ```
@@ -78,6 +85,8 @@ cd ~/CudaAwareDistributedScheduler
 source .venv/bin/activate
 ```
 
+### Option A: Submit directly with the bootstrap admin token
+
 Submit a job through the control plane:
 
 ```bash
@@ -86,8 +95,67 @@ curl -X POST http://<login-node>:8000/api/jobs \
   -H "Content-Type: application/json" \
   -d '{
     "job_id": "demo-001",
+    "project": "default",
     "image": "",
-    "cmd": ["nvidia-smi"],
+    "cmd": ["sh", "-c", "sleep 5; hostname"],
+    "gpus": 1,
+    "metadata": {"partition": "gpuqs"}
+  }'
+```
+
+### Option B: Demo the token-request workflow first
+
+Submit a public token request:
+
+```bash
+curl -X POST http://<login-node>:8000/api/token-requests \
+  -H "Content-Type: application/json" \
+  -d '{
+    "subject_name": "demo-user",
+    "email": "demo-user@example.com",
+    "requested_projects": ["default"],
+    "purpose": "SLURM response-mode demo"
+  }'
+```
+
+List pending requests as admin:
+
+```bash
+curl -H "Authorization: Bearer <operator-token>" \
+  "http://<login-node>:8000/api/admin/token-requests?status=PENDING"
+```
+
+Approve a pending request and capture the returned token:
+
+```bash
+REQ_ID="<request-id>"
+
+curl -X POST \
+  "http://<login-node>:8000/api/admin/token-requests/$REQ_ID/approve" \
+  -H "Authorization: Bearer <operator-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"review_notes":"approved during live demo"}'
+```
+
+When `TOKEN_DELIVERY_MODE=response`, the approval response contains:
+
+```json
+{
+  "plaintext_token": "<user-token>"
+}
+```
+
+Use that returned user token to submit the demo job:
+
+```bash
+curl -X POST http://<login-node>:8000/api/jobs \
+  -H "Authorization: Bearer <user-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "job_id": "demo-user-001",
+    "project": "default",
+    "image": "",
+    "cmd": ["sh", "-c", "sleep 5; hostname"],
     "gpus": 1,
     "metadata": {"partition": "gpuqs"}
   }'
@@ -98,7 +166,8 @@ curl -X POST http://<login-node>:8000/api/jobs \
 Check the control-plane view:
 
 ```bash
-curl http://<login-node>:8000/api/jobs | python3 -m json.tool
+curl -H "Authorization: Bearer <operator-token>" \
+  http://<login-node>:8000/api/jobs | python3 -m json.tool
 ```
 
 Check the direct SLURM view:
@@ -107,10 +176,11 @@ Check the direct SLURM view:
 squeue -u <your-id>
 ```
 
-If the job finishes quickly, inspect accounting output:
+If you want to show a user-scoped read:
 
 ```bash
-sacct -j <slurm-job-id> --format=JobID,State,ExitCode,NodeList
+curl -H "Authorization: Bearer <user-token>" \
+  http://<login-node>:8000/api/jobs/demo-user-001 | python3 -m json.tool
 ```
 
 ## 6. View the dashboard from your laptop
@@ -137,6 +207,7 @@ Open:
 ## 7. What to point out during the demo
 
 - Submit a job from the API or UI.
+- Optionally show the token request and approval flow before job submission.
 - Show the job appear in `/api/jobs`.
 - Show the corresponding SLURM job in `squeue`.
 - Show the state transition to `RUNNING` and then `DONE` or `FAILED`.
@@ -147,3 +218,5 @@ Open:
 - `CONTROL_PLANE_CALLBACK_URL` must be reachable from compute nodes. `127.0.0.1` is only valid if the callback runs on the same host namespace as the job.
 - If your cluster uses a different Python module name/version, replace `python3/3.11.5` with the correct one.
 - If your cluster uses different partitions, replace `gpuqs` with a valid partition name.
+- `TOKEN_DELIVERY_MODE=response` is recommended on HPC when outbound SMTP is blocked.
+- On clusters where `sacct` is disabled, lifecycle completion can still succeed through callback updates as long as `CONTROL_PLANE_CALLBACK_URL` is reachable from compute nodes.
