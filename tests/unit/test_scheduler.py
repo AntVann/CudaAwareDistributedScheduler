@@ -1,5 +1,5 @@
 from control_plane.core import scheduler as scheduler_module
-from control_plane.core.models import JobSpec, SchedulerPolicy
+from control_plane.core.models import JobSpec, JobState, JobStatus, SchedulerPolicy
 from control_plane.core.scheduler import NodeCandidate
 
 
@@ -40,19 +40,149 @@ class SchedulerStub(scheduler_module.NaiveScheduler):
 def test_tick_requeues_job_when_no_eligible_nodes(monkeypatch):
     fake_redis = FakeRedis()
     monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
     monkeypatch.setattr(
         scheduler_module,
         "get_job_spec",
         lambda job_id: JobSpec(job_id=job_id, project="default", image="", cmd=["echo", "hi"], gpus=2),
     )
     place_calls = []
-    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id, decision=None: place_calls.append((job_id, node_id)))
 
     SchedulerStub(nodes=[NodeCandidate(node_id="node-a", gpu_count=1, avg_utilization=0.0)]).tick()
 
     assert fake_redis.left_pushes == []
     assert fake_redis.right_pushes == [("jobs:queue", "job-1")]
     assert place_calls == []
+
+
+def test_tick_persists_no_placement_decision_when_no_eligible_nodes(monkeypatch):
+    """When tick() pops a job and finds no eligible nodes, it should persist a
+    structured placement_decision so the UI can show *why* the job is stuck."""
+    fake_redis = FakeRedis()
+    decisions = []
+
+    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_job_spec",
+        lambda job_id: JobSpec(job_id=job_id, project="default", image="", cmd=["echo"], gpus=4),
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "set_placement_decision",
+        lambda job_id, decision: decisions.append((job_id, decision)),
+    )
+    monkeypatch.setattr(scheduler_module, "place_job", lambda *args, **kwargs: None)
+
+    # Both nodes are too small for the requested 4 GPUs.
+    SchedulerStub(
+        nodes=[
+            NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0),
+            NodeCandidate(node_id="node-b", gpu_count=2, avg_utilization=0.0),
+        ]
+    ).tick()
+
+    assert fake_redis.right_pushes == [("jobs:queue", "job-1")]
+    assert len(decisions) == 1
+    job_id, decision = decisions[0]
+    assert job_id == "job-1"
+    assert decision["chosen_node_id"] is None
+    assert "no eligible nodes" in decision["chosen_reason"]
+    assert len(decision["candidates"]) == 2
+    for cand in decision["candidates"]:
+        assert cand["eligible"] is False
+        assert cand["selected"] is False
+        assert "rejected_reason" in cand
+        assert "not enough GPUs" in cand["rejected_reason"]
+
+
+def test_tick_requeues_when_get_job_status_raises(monkeypatch):
+    """Regression: if the DB is transiently unavailable, get_job_status() can
+    raise. The scheduler must rpush the popped job back onto the queue rather
+    than silently dropping it."""
+    fake_redis = FakeRedis()
+    submit_calls = []
+
+    class NotCalledBackend:
+        def submit(self, spec, node_hint=None):
+            submit_calls.append((spec.job_id, node_hint))
+            raise AssertionError("backend.submit must not run when status read fails")
+
+    scheduler = SchedulerStub(nodes=[NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0)])
+    scheduler.backend = NotCalledBackend()
+
+    def boom(job_id):
+        raise RuntimeError("transient db error")
+
+    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", boom)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_job_spec",
+        lambda job_id: JobSpec(job_id=job_id, project="default", image="", cmd=["echo"], gpus=1),
+    )
+    monkeypatch.setattr(scheduler_module, "place_job", lambda *a, **k: None)
+    monkeypatch.setattr(scheduler_module, "set_job_state", lambda *a, **k: None)
+
+    scheduler.tick()  # MUST NOT raise; tick is wrapped by the loop in app.py.
+
+    # Job is back on the queue, no dispatch happened.
+    assert submit_calls == []
+    assert fake_redis.right_pushes == [("jobs:queue", "job-1")]
+
+
+def test_tick_requeues_when_get_job_spec_raises(monkeypatch):
+    """Same protection but for the get_job_spec call."""
+    fake_redis = FakeRedis()
+
+    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
+
+    def boom(job_id):
+        raise RuntimeError("transient db error")
+
+    monkeypatch.setattr(scheduler_module, "get_job_spec", boom)
+    monkeypatch.setattr(scheduler_module, "place_job", lambda *a, **k: None)
+
+    SchedulerStub(nodes=[NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0)]).tick()
+
+    assert fake_redis.right_pushes == [("jobs:queue", "job-1")]
+
+
+def test_tick_skips_jobs_already_cancelled_before_dispatch(monkeypatch):
+    """If a job was cancelled while sitting in the queue, the scheduler must
+    not dispatch it to the backend on its next tick."""
+    fake_redis = FakeRedis()
+    submit_calls = []
+    place_calls = []
+
+    class TrackingBackend:
+        def submit(self, spec, node_hint=None):
+            submit_calls.append((spec.job_id, node_hint))
+            return "ignored"
+
+    scheduler = SchedulerStub(nodes=[NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0)])
+    scheduler.backend = TrackingBackend()
+
+    cancelled_status = JobStatus(state=JobState.CANCELLED, reason="cancelled by operator")
+
+    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: cancelled_status)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_job_spec",
+        lambda job_id: JobSpec(job_id=job_id, project="default", image="", cmd=["echo"], gpus=1),
+    )
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id, decision=None: place_calls.append((job_id, node_id)))
+
+    scheduler.tick()
+
+    # Job is dropped silently — no backend dispatch, no place_job, no requeue.
+    assert submit_calls == []
+    assert place_calls == []
+    assert fake_redis.right_pushes == []
 
 
 def test_tick_marks_job_failed_when_backend_submit_raises(monkeypatch):
@@ -70,6 +200,7 @@ def test_tick_marks_job_failed_when_backend_submit_raises(monkeypatch):
     scheduler.backend = ExplodingBackend()
 
     monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
     monkeypatch.setattr(
         scheduler_module,
         "get_job_spec",
@@ -80,7 +211,7 @@ def test_tick_marks_job_failed_when_backend_submit_raises(monkeypatch):
         "set_job_state",
         lambda job_id, state, reason=None, exit_code=None: failed_calls.append((job_id, state, reason, exit_code)),
     )
-    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id, decision=None: place_calls.append((job_id, node_id)))
 
     scheduler.tick()
 
@@ -108,6 +239,7 @@ def test_tick_cancels_backend_job_when_place_job_raises(monkeypatch):
     scheduler.backend = Backend()
 
     monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
     monkeypatch.setattr(
         scheduler_module,
         "get_job_spec",
@@ -116,7 +248,7 @@ def test_tick_cancels_backend_job_when_place_job_raises(monkeypatch):
     monkeypatch.setattr(
         scheduler_module,
         "place_job",
-        lambda job_id, node_id: (_ for _ in ()).throw(RuntimeError("db write failed")),
+        lambda job_id, node_id, decision=None: (_ for _ in ()).throw(RuntimeError("db write failed")),
     )
     monkeypatch.setattr(
         scheduler_module,
@@ -161,6 +293,7 @@ def test_tick_filters_nodes_by_partition_and_state(monkeypatch):
     scheduler.set_active_policy(SchedulerPolicy.FIFO)
 
     monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
     monkeypatch.setattr(
         scheduler_module,
         "get_job_spec",
@@ -174,7 +307,7 @@ def test_tick_filters_nodes_by_partition_and_state(monkeypatch):
         ),
     )
     place_calls = []
-    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id, decision=None: place_calls.append((job_id, node_id)))
 
     scheduler.tick()
 
@@ -194,13 +327,14 @@ def test_fifo_selects_first_eligible_node_in_sorted_order(monkeypatch):
     scheduler.set_active_policy(SchedulerPolicy.FIFO)
 
     monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
     monkeypatch.setattr(
         scheduler_module,
         "get_job_spec",
         lambda job_id: JobSpec(job_id=job_id, project="default", image="", cmd=["echo", "hi"], gpus=2),
     )
     place_calls = []
-    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id, decision=None: place_calls.append((job_id, node_id)))
 
     scheduler.tick()
 
@@ -218,9 +352,9 @@ def test_round_robin_cycles_across_eligible_nodes():
         NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0),
     ]
 
-    first = scheduler._select_node(fake_redis, spec, nodes)
-    second = scheduler._select_node(fake_redis, spec, nodes)
-    third = scheduler._select_node(fake_redis, spec, nodes)
+    first, _ = scheduler._select_node(fake_redis, spec, nodes, nodes)
+    second, _ = scheduler._select_node(fake_redis, spec, nodes, nodes)
+    third, _ = scheduler._select_node(fake_redis, spec, nodes, nodes)
 
     assert (first, second, third) == ("node-a", "node-b", "node-a")
 
@@ -236,7 +370,7 @@ def test_binpack_uses_surplus_then_utilization_then_node_id():
         NodeCandidate(node_id="node-b", gpu_count=3, avg_utilization=40.0),
     ]
 
-    selected = scheduler._select_node(fake_redis, spec, nodes)
+    selected, _ = scheduler._select_node(fake_redis, spec, nodes, nodes)
 
     assert selected == "node-b"
 

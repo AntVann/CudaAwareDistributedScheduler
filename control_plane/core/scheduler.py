@@ -2,16 +2,18 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from control_plane.core.backend import ExecutionBackend
 from control_plane.core.models import JobSpec, SchedulerPolicy
 from control_plane.core.persistence import (
     get_active_policy,
     get_job_spec,
+    get_job_status,
     place_job,
     redis_client,
     set_job_state,
+    set_placement_decision,
 )
 
 logger = logging.getLogger("control_plane.scheduler")
@@ -66,15 +68,51 @@ class NaiveScheduler:
         if not job_id:
             return
 
-        spec = get_job_spec(job_id) or JobSpec(job_id=job_id, project="default", image="", cmd=[])
-        nodes = self._recent_nodes(self.recent_secs)
-        eligible_nodes = self._eligible_nodes(spec, nodes)
-        if not eligible_nodes:
-            r.rpush(_QUEUE_KEY, job_id)
-            logger.info("No eligible nodes for job %s under policy %s", job_id, self.active_policy.value)
-            return
+        # Everything between the destructive lpop above and a successful dispatch
+        # below is wrapped: if any pre-dispatch step raises (transient DB blip in
+        # get_job_status / get_job_spec / placement persistence, scheduler bug,
+        # whatever), we MUST push the job back onto the queue. Otherwise the
+        # job is silently lost. After dispatch succeeds the dispatch-failure
+        # path takes over and marks FAILED; before dispatch we treat exceptions
+        # as transient and let the next tick retry.
+        try:
+            # Drop jobs that left the QUEUED state while waiting in line — most
+            # commonly because the operator cancelled them via /api/jobs/{id}/cancel.
+            current_status = get_job_status(job_id)
+            if current_status is not None and current_status.state.value != "QUEUED":
+                logger.info(
+                    "Skipping job %s: state is %s (cancelled or otherwise terminal)",
+                    job_id,
+                    current_status.state.value,
+                )
+                return
 
-        node_id = self._select_node(r, spec, eligible_nodes)
+            spec = get_job_spec(job_id) or JobSpec(job_id=job_id, project="default", image="", cmd=[])
+            nodes = self._recent_nodes(self.recent_secs)
+            eligible_nodes = self._eligible_nodes(spec, nodes)
+            if not eligible_nodes:
+                r.rpush(_QUEUE_KEY, job_id)
+                # Persist the structured "why not placed" decision so the UI can
+                # surface it in the job's row expansion. Failure here is non-fatal
+                # — the job is already safely back on the queue.
+                try:
+                    no_placement = self._build_no_placement_decision(spec, nodes)
+                    set_placement_decision(job_id, no_placement)
+                except Exception:
+                    logger.exception("Failed to persist no-placement decision for job %s", job_id)
+                logger.info("No eligible nodes for job %s under policy %s", job_id, self.active_policy.value)
+                return
+
+            node_id, decision = self._select_node(r, spec, eligible_nodes, nodes)
+        except Exception:
+            logger.exception("Pre-dispatch error for job %s; requeuing", job_id)
+            try:
+                r.rpush(_QUEUE_KEY, job_id)
+            except Exception:
+                # If even the requeue fails (Redis flap), the job IS lost — log
+                # loudly so operators have a chance to resubmit.
+                logger.exception("CRITICAL: failed to requeue job %s after pre-dispatch error", job_id)
+            return
 
         # Dispatch via backend if available, otherwise fall back to direct Redis push
         dispatched = False
@@ -84,7 +122,7 @@ class NaiveScheduler:
             else:
                 r.rpush(f"assign:{node_id}", job_id)
             dispatched = True
-            place_job(job_id, node_id)
+            place_job(job_id, node_id, decision=decision)
         except Exception as exc:
             logger.exception("Dispatch failed for job %s on node %s", job_id, node_id)
             if dispatched and self.backend:
@@ -101,18 +139,32 @@ class NaiveScheduler:
 
         logger.info("Placed job %s on node %s with policy %s", job_id, node_id, self.active_policy.value)
 
-    def _select_node(self, r, spec: JobSpec, eligible_nodes: List[NodeCandidate]) -> str:
+    def _select_node(
+        self,
+        r,
+        spec: JobSpec,
+        eligible_nodes: List[NodeCandidate],
+        all_nodes: List[NodeCandidate],
+    ) -> Tuple[str, Dict[str, Any]]:
         ordered = sorted(eligible_nodes, key=lambda node: node.node_id)
+        policy = self.active_policy
+        partition = self._desired_partition(spec)
 
-        if self.active_policy == SchedulerPolicy.FIFO:
-            return ordered[0].node_id
+        chosen: NodeCandidate
+        rr_pointer: Optional[int] = None
+        chosen_reason = ""
 
-        if self.active_policy == SchedulerPolicy.ROUND_ROBIN:
-            idx = (int(r.incr(_ROUND_ROBIN_KEY)) - 1) % len(ordered)
-            return ordered[idx].node_id
-
-        if self.active_policy == SchedulerPolicy.BINPACK:
-            selected = min(
+        if policy == SchedulerPolicy.FIFO:
+            chosen = ordered[0]
+            chosen_reason = "first eligible by node_id (FIFO)"
+        elif policy == SchedulerPolicy.ROUND_ROBIN:
+            counter = int(r.incr(_ROUND_ROBIN_KEY))
+            idx = (counter - 1) % len(ordered)
+            rr_pointer = counter
+            chosen = ordered[idx]
+            chosen_reason = f"round-robin pointer={counter} → index {idx} of {len(ordered)}"
+        elif policy == SchedulerPolicy.BINPACK:
+            chosen = min(
                 ordered,
                 key=lambda node: (
                     node.allocatable_gpu_count - spec.gpus,
@@ -120,10 +172,106 @@ class NaiveScheduler:
                     node.node_id,
                 ),
             )
-            return selected.node_id
+            slack = chosen.allocatable_gpu_count - spec.gpus
+            chosen_reason = (
+                f"tightest fit: slack={slack} GPU "
+                f"(util={chosen.avg_utilization:.2f})"
+            )
+        else:
+            logger.warning("Unknown scheduler policy %s; falling back to FIFO", policy.value)
+            chosen = ordered[0]
+            chosen_reason = f"unknown policy {policy.value}; fell back to FIFO"
 
-        logger.warning("Unknown scheduler policy %s; falling back to FIFO", self.active_policy.value)
-        return ordered[0].node_id
+        eligible_ids = {node.node_id for node in ordered}
+        candidates_blob: List[Dict[str, Any]] = []
+        for node in sorted(all_nodes, key=lambda n: n.node_id):
+            entry: Dict[str, Any] = {
+                "node_id": node.node_id,
+                "gpu_count": node.gpu_count,
+                "available_gpu": node.allocatable_gpu_count,
+                "avg_utilization": round(node.avg_utilization, 3),
+                "partitions": list(node.partitions),
+                "state": node.state,
+                "eligible": node.node_id in eligible_ids,
+                "selected": node.node_id == chosen.node_id,
+            }
+            if node.node_id not in eligible_ids:
+                entry["rejected_reason"] = self._rejection_reason(spec, node, partition)
+            if policy == SchedulerPolicy.BINPACK and node.node_id in eligible_ids:
+                entry["score"] = node.allocatable_gpu_count - spec.gpus
+            candidates_blob.append(entry)
+
+        decision: Dict[str, Any] = {
+            "policy": policy.value,
+            "partition": partition,
+            "requested_gpus": spec.gpus,
+            "chosen_node_id": chosen.node_id,
+            "chosen_reason": chosen_reason,
+            "candidates": candidates_blob,
+            "decided_at": time.time(),
+        }
+        if rr_pointer is not None:
+            decision["round_robin_pointer"] = rr_pointer
+
+        return chosen.node_id, decision
+
+    def _build_no_placement_decision(
+        self,
+        spec: JobSpec,
+        all_nodes: List[NodeCandidate],
+    ) -> Dict[str, Any]:
+        """
+        Build a placement_decision blob for a tick that found no eligible nodes.
+        chosen_node_id is None and every candidate carries a rejection reason.
+        Highest-priority reason becomes chosen_reason so UI can show a one-liner.
+        """
+        partition = self._desired_partition(spec)
+        candidates_blob: List[Dict[str, Any]] = []
+        for node in sorted(all_nodes, key=lambda n: n.node_id):
+            candidates_blob.append(
+                {
+                    "node_id": node.node_id,
+                    "gpu_count": node.gpu_count,
+                    "available_gpu": node.allocatable_gpu_count,
+                    "avg_utilization": round(node.avg_utilization, 3),
+                    "partitions": list(node.partitions),
+                    "state": node.state,
+                    "eligible": False,
+                    "selected": False,
+                    "rejected_reason": self._rejection_reason(spec, node, partition),
+                }
+            )
+
+        if not candidates_blob:
+            chosen_reason = "no nodes are reporting heartbeats"
+        else:
+            # Surface the first node's rejection reason as the headline; if all
+            # candidates share the same blocker (e.g. drained), it's accurate.
+            chosen_reason = "no eligible nodes: " + candidates_blob[0]["rejected_reason"]
+
+        return {
+            "policy": self.active_policy.value,
+            "partition": partition,
+            "requested_gpus": spec.gpus,
+            "chosen_node_id": None,
+            "chosen_reason": chosen_reason,
+            "candidates": candidates_blob,
+            "decided_at": time.time(),
+        }
+
+    def _rejection_reason(
+        self,
+        spec: JobSpec,
+        node: NodeCandidate,
+        desired_partition: Optional[str],
+    ) -> str:
+        if not self._is_node_schedulable(node):
+            return f"state={node.state or 'unknown'}"
+        if not self._node_matches_partition(node, desired_partition):
+            return f"partition mismatch (need {desired_partition}, have {','.join(node.partitions) or '-'})"
+        if node.allocatable_gpu_count < spec.gpus:
+            return f"not enough GPUs ({node.allocatable_gpu_count} available, {spec.gpus} requested)"
+        return "ineligible"
 
     def _recent_nodes(self, seconds: int) -> List[NodeCandidate]:
         # If we have a backend, use it for node discovery

@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   gpu_ids TEXT,
   timestamps TEXT,
   exit_code INTEGER,
-  reason TEXT
+  reason TEXT,
+  placement_decision TEXT
 );
 
 CREATE TABLE IF NOT EXISTS nodes (
@@ -353,6 +354,9 @@ def bootstrap_storage():
         logger.info("Ensuring sqlite schema exists at %s", _sqlite_path())
         with _sqlite_conn() as conn:
             conn.executescript(_SQLITE_SCHEMA)
+            existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+            if "placement_decision" not in existing_cols:
+                conn.execute("ALTER TABLE jobs ADD COLUMN placement_decision TEXT")
         return
 
     logger.info("Ensuring schema exists via %s", _SCHEMA_PATH)
@@ -749,7 +753,8 @@ def get_job_spec(job_id: str) -> Optional[JobSpec]:
     return JobSpec.model_validate(spec_payload)
 
 
-def place_job(job_id: str, node_id: str) -> None:
+def place_job(job_id: str, node_id: str, decision: Optional[Dict[str, Any]] = None) -> None:
+    decision_json = json.dumps(decision) if decision is not None else None
     if _use_sqlite():
         ts = time.time()
         with _sqlite_conn() as conn:
@@ -761,10 +766,10 @@ def place_job(job_id: str, node_id: str) -> None:
             conn.execute(
                 """
                 UPDATE jobs
-                SET status=?, node_id=?, timestamps=?
+                SET status=?, node_id=?, timestamps=?, placement_decision=COALESCE(?, placement_decision)
                 WHERE job_id=?
                 """,
-                (JobState.PLACED.value, node_id, json.dumps(timestamps), job_id),
+                (JobState.PLACED.value, node_id, json.dumps(timestamps), decision_json, job_id),
             )
         return
 
@@ -775,10 +780,40 @@ def place_job(job_id: str, node_id: str) -> None:
                 UPDATE jobs
                 SET status=%s,
                     node_id=%s,
-                    timestamps = coalesce(timestamps, '{}'::jsonb) || %s::jsonb
+                    timestamps = coalesce(timestamps, '{}'::jsonb) || %s::jsonb,
+                    placement_decision = COALESCE(%s::jsonb, placement_decision)
                 WHERE job_id=%s
                 """,
-                ("PLACED", node_id, json.dumps({"placed": time.time()}), job_id),
+                ("PLACED", node_id, json.dumps({"placed": time.time()}), decision_json, job_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"Job {job_id} not found")
+
+
+def set_placement_decision(job_id: str, decision: Dict[str, Any]) -> None:
+    """
+    Update the placement_decision JSON blob without changing status. Used by the
+    scheduler when a job stays QUEUED for a structural reason (no eligible nodes,
+    partition mismatch, etc.) so the UI can show *why* it isn't placed.
+    """
+    if not job_id:
+        raise ValueError("job_id is required")
+    decision_json = json.dumps(decision)
+    if _use_sqlite():
+        with _sqlite_conn() as conn:
+            cur = conn.execute(
+                "UPDATE jobs SET placement_decision=? WHERE job_id=?",
+                (decision_json, job_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"Job {job_id} not found")
+        return
+
+    with pg_conn() as conn:
+        with _cursor(conn) as cur:
+            cur.execute(
+                "UPDATE jobs SET placement_decision = %s::jsonb WHERE job_id = %s",
+                (decision_json, job_id),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"Job {job_id} not found")
@@ -830,29 +865,49 @@ def set_job_state(
     state: str,
     exit_code: Optional[int] = None,
     reason: Optional[str] = None,
+    timestamps: Optional[Dict[str, float]] = None,
 ) -> None:
+    """
+    Update job status. The state's own timestamp (`state.lower()`) is always
+    recorded with the current wall clock. Pass `timestamps={...}` to also merge
+    extra keys (e.g. the SLURM poller passes a `running` timestamp derived from
+    sacct's Start field; without that we lose the start-time and run latencies
+    show as zero).
+    """
     if not job_id:
         raise ValueError("job_id is required")
     if state not in JobState._value2member_map_:  # type: ignore[attr-defined]
         raise ValueError(f"Invalid state: {state}")
 
     ts_key = state.lower()
-    ts_value = time.time()
+    extra_timestamps: Dict[str, float] = dict(timestamps) if timestamps else {}
+    # Prefer the caller's own timestamp for the new state if they provided
+    # one (e.g. the SLURM poller knows the actual Start time from sacct).
+    # Otherwise fall back to current wall clock.
+    if ts_key in extra_timestamps and extra_timestamps[ts_key] is not None:
+        ts_value = float(extra_timestamps[ts_key])
+    else:
+        ts_value = time.time()
 
     if _use_sqlite():
         with _sqlite_conn() as conn:
             row = conn.execute("SELECT timestamps FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
             if row is None:
                 raise KeyError(f"Job {job_id} not found")
-            timestamps = _json_load(row["timestamps"], {})
-            timestamps[ts_key] = ts_value
+            existing = _json_load(row["timestamps"], {})
+            for key, value in extra_timestamps.items():
+                # Fill in keys we don't already have a timestamp for. Never
+                # overwrite an existing recorded value.
+                if key not in existing and value is not None:
+                    existing[key] = float(value)
+            existing[ts_key] = ts_value
             cur = conn.execute(
                 """
                 UPDATE jobs
                 SET status=?, exit_code=?, reason=?, timestamps=?
                 WHERE job_id=?
                 """,
-                (state, exit_code, reason, json.dumps(timestamps), job_id),
+                (state, exit_code, reason, json.dumps(existing), job_id),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"Job {job_id} not found")
@@ -860,16 +915,21 @@ def set_job_state(
 
     with pg_conn() as conn:
         with _cursor(conn) as cur:
+            # JSONB `||` lets right-hand keys win on conflict. We want existing
+            # timestamps to win over `extras` (so we never clobber a recorded
+            # timestamp), but the state-keyed `now` to always win over both.
+            extras_json = json.dumps({k: float(v) for k, v in extra_timestamps.items() if v is not None})
+            state_keyed = json.dumps({ts_key: ts_value})
             cur.execute(
                 """
                 UPDATE jobs
                 SET status=%s,
                     exit_code=%s,
                     reason=%s,
-                    timestamps = coalesce(timestamps, '{}'::jsonb) || %s::jsonb
+                    timestamps = %s::jsonb || coalesce(timestamps, '{}'::jsonb) || %s::jsonb
                 WHERE job_id=%s
                 """,
-                (state, exit_code, reason, json.dumps({ts_key: ts_value}), job_id),
+                (state, exit_code, reason, extras_json, state_keyed, job_id),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"Job {job_id} not found")
@@ -933,7 +993,7 @@ def list_jobs(is_admin: bool = False, projects: Optional[List[str]] = None) -> L
         with _sqlite_conn() as conn:
             rows = conn.execute(
                 """
-                SELECT job_id, spec, status, backend_ref, node_id, gpu_ids, timestamps, exit_code, reason
+                SELECT job_id, spec, status, backend_ref, node_id, gpu_ids, timestamps, exit_code, reason, placement_decision
                 FROM jobs
                 """
             ).fetchall()
@@ -955,6 +1015,7 @@ def list_jobs(is_admin: bool = False, projects: Optional[List[str]] = None) -> L
                     "timestamps": timestamps,
                     "exit_code": row["exit_code"],
                     "reason": row["reason"],
+                    "placement_decision": _json_load(row["placement_decision"], None),
                 }
             )
         result.sort(key=lambda item: float((item.get("timestamps") or {}).get("enqueued", 0.0)), reverse=True)
@@ -967,7 +1028,7 @@ def list_jobs(is_admin: bool = False, projects: Optional[List[str]] = None) -> L
         with _cursor(conn, cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 f"""
-                SELECT job_id, project, status, backend_ref, node_id, gpu_ids, timestamps, exit_code, reason
+                SELECT job_id, project, status, backend_ref, node_id, gpu_ids, timestamps, exit_code, reason, placement_decision
                 FROM jobs
                 {clause}
                 ORDER BY (timestamps->>'enqueued')::float DESC NULLS LAST
@@ -989,6 +1050,7 @@ def list_jobs(is_admin: bool = False, projects: Optional[List[str]] = None) -> L
                 "timestamps": row["timestamps"] or {},
                 "exit_code": row["exit_code"],
                 "reason": row["reason"],
+                "placement_decision": row.get("placement_decision"),
             }
         )
     return result

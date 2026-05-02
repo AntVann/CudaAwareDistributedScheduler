@@ -3,11 +3,16 @@ import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
 import { useOperatorAuth } from "../auth-context";
 import {
+  cancelJob,
+  fetchJobLogs,
   fetchJobs,
   submitJob,
-  type JobListItem,
   type EnqueueResponse,
+  type JobListItem,
+  type JobLogsResponse,
 } from "../api/client";
+
+const CANCELLABLE_STATES = new Set(["QUEUED", "PLACED", "RUNNING"]);
 
 function formatTs(ts: number | null | undefined): string {
   if (!ts) return "-";
@@ -17,6 +22,118 @@ function formatTs(ts: number | null | undefined): string {
 function truncate(s: string | null | undefined, max = 60): string {
   if (!s) return "-";
   return s.length > max ? s.slice(0, max) + "..." : s;
+}
+
+function JobLogsPanel({
+  jobId,
+  hasBackendRef,
+  token,
+}: {
+  jobId: string;
+  hasBackendRef: boolean;
+  token: string;
+}) {
+  const [stream, setStream] = useState<"stdout" | "stderr">("stderr");
+  const [logs, setLogs] = useState<JobLogsResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadLogs = useCallback(
+    async (which: "stdout" | "stderr") => {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await fetchJobLogs(jobId, which, token, 200);
+        setLogs(data);
+        setStream(which);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load logs");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [jobId, token],
+  );
+
+  if (!hasBackendRef) {
+    return (
+      <div className="mt-4 rounded-md border border-border bg-surface-1 p-3 text-xs text-text-muted">
+        No SLURM job ID yet — logs are available once the job is dispatched to SLURM.
+      </div>
+    );
+  }
+
+  if (!token) {
+    return (
+      <div className="mt-4 rounded-md border border-border bg-surface-1 p-3 text-xs text-text-muted">
+        Bearer token required to fetch logs.
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 rounded-md border border-border bg-surface-1 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-xs font-medium text-text-secondary">Logs</span>
+        <div className="flex gap-2">
+          <button
+            onClick={() => loadLogs("stderr")}
+            className={`rounded px-2 py-1 text-xs ${
+              stream === "stderr" && logs
+                ? "bg-accent text-white"
+                : "border border-border text-text-secondary hover:bg-surface-2"
+            }`}
+          >
+            stderr
+          </button>
+          <button
+            onClick={() => loadLogs("stdout")}
+            className={`rounded px-2 py-1 text-xs ${
+              stream === "stdout" && logs
+                ? "bg-accent text-white"
+                : "border border-border text-text-secondary hover:bg-surface-2"
+            }`}
+          >
+            stdout
+          </button>
+          {logs && (
+            <button
+              onClick={() => loadLogs(stream)}
+              className="rounded border border-border px-2 py-1 text-xs text-text-secondary hover:bg-surface-2"
+            >
+              ↻ Refresh
+            </button>
+          )}
+        </div>
+      </div>
+      {error && <p className="text-xs text-state-failed">{error}</p>}
+      {loading && <p className="text-xs text-text-muted">Loading {stream}...</p>}
+      {!loading && !logs && !error && (
+        <p className="text-xs text-text-muted">Click stderr or stdout to view the tail.</p>
+      )}
+      {logs && (
+        <div className="space-y-2">
+          <p className="font-mono text-[11px] text-text-muted break-all">
+            {logs.path}
+            {logs.exists
+              ? ` · ${logs.lines} line${logs.lines === 1 ? "" : "s"}${
+                  logs.truncated ? " (tail)" : ""
+                } · ${logs.bytes_total} bytes`
+              : " · file not yet written"}
+          </p>
+          {logs.exists ? (
+            <pre className="max-h-80 overflow-auto rounded bg-surface-0 p-2 font-mono text-[11px] text-text-secondary whitespace-pre-wrap">
+              {logs.content || "(empty)"}
+            </pre>
+          ) : (
+            <p className="text-xs text-text-muted">
+              SLURM hasn't written this stream yet. Try refresh once the job is RUNNING or terminal.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 const PARTITION_OPTIONS = [
@@ -34,8 +151,38 @@ export default function Jobs() {
   const [jobs, setJobs] = useState<JobListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  // Default ON: this is a live ops dashboard, stale rows are misleading.
+  // Polling tick is 3s in the effect below; users can toggle off with the checkbox.
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // Filter / search / sort state. State multi-select defaults to all-on, search
+  // is a substring match on job_id, sort toggles enqueued newest/oldest.
+  const ALL_STATES = ["QUEUED", "PLACED", "RUNNING", "DONE", "FAILED", "CANCELLED"];
+  const [stateFilter, setStateFilter] = useState<Set<string>>(new Set(ALL_STATES));
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortDir, setSortDir] = useState<"newest" | "oldest">("newest");
+  // Time window in hours; null = all time. Default 24h matches typical "what
+  // happened today" workflow without losing access to older rows.
+  const TIME_WINDOWS: { value: number | null; label: string }[] = [
+    { value: 1, label: "1h" },
+    { value: 24, label: "24h" },
+    { value: 24 * 7, label: "7d" },
+    { value: null, label: "all" },
+  ];
+  const [windowHours, setWindowHours] = useState<number | null>(24);
+
+  const toggleStateFilter = (state: string) => {
+    setStateFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(state)) {
+        next.delete(state);
+      } else {
+        next.add(state);
+      }
+      return next;
+    });
+  };
 
   // Submit form state
   const [showSubmit, setShowSubmit] = useState(false);
@@ -43,6 +190,12 @@ export default function Jobs() {
   const [cmd, setCmd] = useState('["echo", "hello"]');
   const [gpus, setGpus] = useState(1);
   const [partition, setPartition] = useState("");
+  // Optional advanced fields (#13). Empty string = leave the JobSpec field
+  // unset so the backend keeps its defaults.
+  const [cpuStr, setCpuStr] = useState("");
+  const [memGbStr, setMemGbStr] = useState("");
+  const [priorityStr, setPriorityStr] = useState("");
+  const [envText, setEnvText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState<{ msg: string; ok: boolean } | null>(null);
 
@@ -94,6 +247,26 @@ export default function Jobs() {
     };
   }, [autoRefresh, loadJobs]);
 
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+
+  const handleCancel = async (jobId: string) => {
+    if (!token) return;
+    if (!window.confirm(`Cancel job ${jobId}? This sends scancel to SLURM.`)) {
+      return;
+    }
+    setCancellingId(jobId);
+    setCancelError(null);
+    try {
+      await cancelJob(jobId, token);
+      void loadJobs();
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : "Cancel failed");
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
   const handleSubmit = async () => {
     setSubmitting(true);
     setSubmitResult(null);
@@ -104,14 +277,40 @@ export default function Jobs() {
       if (partition) {
         metadata.partition = partition;
       }
-      const res: EnqueueResponse = await submitJob({
+
+      // Parse optional advanced fields. Empty / whitespace = leave undefined.
+      const cpu = cpuStr.trim() ? parseInt(cpuStr, 10) : undefined;
+      const memGb = memGbStr.trim() ? parseFloat(memGbStr) : undefined;
+      const priority = priorityStr.trim() ? parseInt(priorityStr, 10) : undefined;
+      const env: Record<string, string> = {};
+      for (const rawLine of envText.split("\n")) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith("#")) continue;
+        const eq = line.indexOf("=");
+        if (eq <= 0) {
+          throw new Error(
+            `Env line not in KEY=VALUE form: ${line}. Use one VAR=value per line, # for comments.`,
+          );
+        }
+        const key = line.slice(0, eq).trim();
+        const value = line.slice(eq + 1);
+        env[key] = value;
+      }
+
+      const spec: import("../api/client").JobSpec = {
         job_id: jobId,
         project: project.trim(),
         image: "",
         cmd: parsedCmd,
         gpus,
         metadata,
-      }, token);
+      };
+      if (cpu !== undefined && !Number.isNaN(cpu)) spec.cpu = cpu;
+      if (memGb !== undefined && !Number.isNaN(memGb)) spec.mem_gb = memGb;
+      if (priority !== undefined && !Number.isNaN(priority)) spec.priority = priority;
+      if (Object.keys(env).length > 0) spec.env = env;
+
+      const res: EnqueueResponse = await submitJob(spec, token);
       setSubmitResult({
         msg: res.created
           ? `Created job ${res.job_id} (201)`
@@ -147,7 +346,7 @@ export default function Jobs() {
             onClick={() => setShowSubmit(!showSubmit)}
             className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
           >
-            Submit Test Job
+            Submit Job
           </button>
         </div>
       </div>
@@ -155,9 +354,10 @@ export default function Jobs() {
       {/* Submit panel */}
       {showSubmit && (
         <Card>
-          <h3 className="text-sm font-medium text-text-secondary mb-3">Submit a Test Job</h3>
+          <h3 className="text-sm font-medium text-text-secondary mb-3">Submit a Job</h3>
           <p className="mb-3 text-xs text-text-muted">
-            This action requires a valid user/admin token stored in the sidebar.
+            Requires a valid user/admin token in the sidebar. Advanced fields (CPU,
+            memory, priority, env) are optional — leave blank to use backend defaults.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
             <div>
@@ -225,6 +425,60 @@ export default function Jobs() {
               </div>
             </div>
           </div>
+
+          {/* Advanced fields — match the JobSpec model 1:1 */}
+          <details className="mb-3 rounded-md border border-border bg-surface-0 px-3 py-2">
+            <summary className="cursor-pointer text-xs font-medium text-text-secondary">
+              Advanced (CPU / Memory / Priority / Env)
+            </summary>
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs text-text-muted mb-1">CPUs</label>
+                <input
+                  type="number"
+                  min={1}
+                  placeholder="default"
+                  value={cpuStr}
+                  onChange={(e) => setCpuStr(e.target.value)}
+                  className="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted mb-1">Memory (GB)</label>
+                <input
+                  type="number"
+                  min={0}
+                  step="0.5"
+                  placeholder="default"
+                  value={memGbStr}
+                  onChange={(e) => setMemGbStr(e.target.value)}
+                  className="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted mb-1">Priority</label>
+                <input
+                  type="number"
+                  placeholder="0"
+                  value={priorityStr}
+                  onChange={(e) => setPriorityStr(e.target.value)}
+                  className="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent"
+                />
+              </div>
+            </div>
+            <div className="mt-3">
+              <label className="block text-xs text-text-muted mb-1">
+                Env (one VAR=value per line, # for comments)
+              </label>
+              <textarea
+                value={envText}
+                onChange={(e) => setEnvText(e.target.value)}
+                rows={4}
+                placeholder={"# example\nCUDA_VISIBLE_DEVICES=0,1\nMY_FLAG=1"}
+                className="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+              />
+            </div>
+          </details>
           <div className="flex items-center gap-3">
             <button
               onClick={handleSubmit}
@@ -248,30 +502,147 @@ export default function Jobs() {
         </div>
       )}
 
-      {/* Jobs table */}
-      {loading ? (
-        <p className="text-sm text-text-muted">Loading...</p>
-      ) : jobs.length === 0 ? (
+      {/* Filter / search / sort bar — only shown when there are jobs to filter */}
+      {!loading && jobs.length > 0 && (
         <Card>
-          <p className="text-sm text-text-muted text-center py-4">No jobs found. Submit a test job to get started.</p>
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="text-text-muted mr-1">State:</span>
+              {ALL_STATES.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => toggleStateFilter(s)}
+                  className={`rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+                    stateFilter.has(s)
+                      ? "border-accent bg-accent/10 text-accent"
+                      : "border-border bg-surface-0 text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  {s}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setStateFilter(new Set(ALL_STATES))}
+                className="ml-1 text-[11px] text-text-muted hover:text-text-secondary underline-offset-2 hover:underline"
+              >
+                all
+              </button>
+              <button
+                type="button"
+                onClick={() => setStateFilter(new Set())}
+                className="text-[11px] text-text-muted hover:text-text-secondary underline-offset-2 hover:underline"
+              >
+                none
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-text-muted">Search:</span>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="job_id substring"
+                className="rounded-md border border-border bg-surface-0 px-2 py-1 text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="text-text-muted mr-1">Window:</span>
+              {TIME_WINDOWS.map((w) => (
+                <button
+                  key={w.label}
+                  type="button"
+                  onClick={() => setWindowHours(w.value)}
+                  className={`rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+                    windowHours === w.value
+                      ? "border-accent bg-accent/10 text-accent"
+                      : "border-border bg-surface-0 text-text-muted hover:text-text-secondary"
+                  }`}
+                  title={
+                    w.value === null
+                      ? "Show all jobs regardless of age"
+                      : `Show jobs enqueued in the last ${w.label}`
+                  }
+                >
+                  {w.label}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => setSortDir((d) => (d === "newest" ? "oldest" : "newest"))}
+              className="rounded-md border border-border bg-surface-0 px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary"
+              title="Toggle sort direction"
+            >
+              Enqueued {sortDir === "newest" ? "↓ newest" : "↑ oldest"}
+            </button>
+          </div>
         </Card>
-      ) : (
-        <div className="overflow-x-auto rounded-lg border border-border">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border bg-surface-1 text-left text-xs text-text-muted">
-                <th className="px-4 py-2.5 font-medium">Job ID</th>
-                <th className="px-4 py-2.5 font-medium">SLURM ID</th>
-                <th className="px-4 py-2.5 font-medium">State</th>
-                <th className="px-4 py-2.5 font-medium">Project</th>
-                <th className="px-4 py-2.5 font-medium">Node</th>
-                <th className="px-4 py-2.5 font-medium">Exit Code</th>
-                <th className="px-4 py-2.5 font-medium">Reason</th>
-                <th className="px-4 py-2.5 font-medium">Enqueued</th>
-              </tr>
-            </thead>
-            <tbody>
-              {jobs.map((job) => (
+      )}
+
+      {/* Jobs table */}
+      {(() => {
+        const q = searchQuery.trim().toLowerCase();
+        const cutoffSecs =
+          windowHours === null ? null : Date.now() / 1000 - windowHours * 3600;
+        const filtered = jobs
+          .filter((j) => stateFilter.has(j.state))
+          .filter((j) => !q || j.job_id.toLowerCase().includes(q))
+          .filter((j) => {
+            if (cutoffSecs === null) return true;
+            const enq = j.timestamps?.enqueued ?? 0;
+            return enq >= cutoffSecs;
+          });
+        const sorted = [...filtered].sort((a, b) => {
+          const ta = a.timestamps?.enqueued ?? 0;
+          const tb = b.timestamps?.enqueued ?? 0;
+          return sortDir === "newest" ? (tb || 0) - (ta || 0) : (ta || 0) - (tb || 0);
+        });
+
+        if (loading) {
+          return <p className="text-sm text-text-muted">Loading...</p>;
+        }
+        if (jobs.length === 0) {
+          return (
+            <Card>
+              <p className="text-sm text-text-muted text-center py-4">
+                No jobs found. Submit a test job to get started.
+              </p>
+            </Card>
+          );
+        }
+        if (sorted.length === 0) {
+          return (
+            <Card>
+              <p className="text-sm text-text-muted text-center py-4">
+                No jobs match the current filter ({jobs.length} total). Try adjusting state or search.
+              </p>
+            </Card>
+          );
+        }
+        return (
+          <div className="space-y-2">
+            <p className="text-xs text-text-muted">
+              Showing {sorted.length} of {jobs.length}
+              {sorted.length !== jobs.length ? " (filtered)" : ""}.
+            </p>
+            <div className="overflow-x-auto rounded-lg border border-border">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border bg-surface-1 text-left text-xs text-text-muted">
+                    <th className="px-4 py-2.5 font-medium">Job ID</th>
+                    <th className="px-4 py-2.5 font-medium">SLURM ID</th>
+                    <th className="px-4 py-2.5 font-medium">State</th>
+                    <th className="px-4 py-2.5 font-medium">Project</th>
+                    <th className="px-4 py-2.5 font-medium">Node</th>
+                    <th className="px-4 py-2.5 font-medium">Exit Code</th>
+                    <th className="px-4 py-2.5 font-medium">Reason</th>
+                    <th className="px-4 py-2.5 font-medium">Enqueued</th>
+                  </tr>
+                </thead>
+                <tbody>
+              {sorted.map((job) => (
                 <Fragment key={job.job_id}>
                   <tr
                     onClick={() => setExpandedId(expandedId === job.job_id ? null : job.job_id)}
@@ -303,6 +674,29 @@ export default function Jobs() {
                   {expandedId === job.job_id && (
                     <tr className="border-b border-border bg-surface-2/30">
                       <td colSpan={8} className="px-6 py-4">
+                        {CANCELLABLE_STATES.has(job.state) && (
+                          <div className="mb-3 flex items-center gap-3">
+                            <button
+                              onClick={() => handleCancel(job.job_id)}
+                              disabled={!token || cancellingId === job.job_id}
+                              title={
+                                !token ? "Operator token required" : undefined
+                              }
+                              className="rounded-md border border-state-failed/40 bg-state-failed/10 px-3 py-1.5 text-xs font-medium text-state-failed hover:bg-state-failed/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            >
+                              {cancellingId === job.job_id
+                                ? "Cancelling..."
+                                : token
+                                  ? "Cancel job"
+                                  : "Cancel (token required)"}
+                            </button>
+                            {cancelError && cancellingId === null && (
+                              <span className="text-xs text-state-failed">
+                                {cancelError}
+                              </span>
+                            )}
+                          </div>
+                        )}
                         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
                           <div>
                             <span className="text-text-muted">GPU IDs:</span>{" "}
@@ -329,6 +723,102 @@ export default function Jobs() {
                             </div>
                           )}
                         </div>
+
+                        <JobLogsPanel jobId={job.job_id} hasBackendRef={!!job.backend_ref} token={token} />
+
+                        {job.placement_decision && (
+                          <div className="mt-4 rounded-md border border-border bg-surface-1 p-3">
+                            <div className="mb-2 flex items-center gap-2 text-xs font-medium">
+                              <span className="text-text-secondary">
+                                Placement decision
+                              </span>
+                              {job.placement_decision.chosen_node_id === null && (
+                                <span className="rounded border border-state-queued/40 bg-state-queued/10 px-2 py-0.5 text-[10px] text-state-queued">
+                                  STUCK · no eligible nodes
+                                </span>
+                              )}
+                            </div>
+                            <div className="mb-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                              <div>
+                                <span className="text-text-muted">Policy:</span>{" "}
+                                <span className="font-mono text-accent">
+                                  {job.placement_decision.policy}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-text-muted">Partition:</span>{" "}
+                                <span className="font-mono text-text-secondary">
+                                  {job.placement_decision.partition ?? "any"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-text-muted">Requested GPUs:</span>{" "}
+                                <span className="font-mono text-text-secondary">
+                                  {job.placement_decision.requested_gpus}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-text-muted">Decided at:</span>{" "}
+                                <span className="font-mono text-text-secondary">
+                                  {formatTs(job.placement_decision.decided_at)}
+                                </span>
+                              </div>
+                              <div className="col-span-full">
+                                <span className="text-text-muted">Why:</span>{" "}
+                                <span className="font-mono text-text-secondary">
+                                  {job.placement_decision.chosen_reason}
+                                </span>
+                              </div>
+                            </div>
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="text-text-muted">
+                                  <th className="text-left font-medium px-2 py-1">Node</th>
+                                  <th className="text-left font-medium px-2 py-1">Avail/Total GPU</th>
+                                  <th className="text-left font-medium px-2 py-1">Util</th>
+                                  <th className="text-left font-medium px-2 py-1">Partitions</th>
+                                  <th className="text-left font-medium px-2 py-1">State</th>
+                                  <th className="text-left font-medium px-2 py-1">Result</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {job.placement_decision.candidates.map((cand) => (
+                                  <tr
+                                    key={cand.node_id}
+                                    className={
+                                      cand.selected
+                                        ? "bg-state-done/10"
+                                        : cand.eligible
+                                          ? ""
+                                          : "text-text-muted"
+                                    }
+                                  >
+                                    <td className="font-mono px-2 py-1">{cand.node_id}</td>
+                                    <td className="font-mono px-2 py-1">
+                                      {cand.available_gpu}/{cand.gpu_count}
+                                    </td>
+                                    <td className="font-mono px-2 py-1">
+                                      {(cand.avg_utilization * 100).toFixed(0)}%
+                                    </td>
+                                    <td className="font-mono px-2 py-1">
+                                      {cand.partitions.join(",") || "-"}
+                                    </td>
+                                    <td className="font-mono px-2 py-1">{cand.state || "-"}</td>
+                                    <td className="px-2 py-1">
+                                      {cand.selected ? (
+                                        <span className="text-state-done font-medium">SELECTED</span>
+                                      ) : cand.eligible ? (
+                                        <span className="text-text-secondary">eligible</span>
+                                      ) : (
+                                        <span className="text-text-muted">{cand.rejected_reason}</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   )}
@@ -337,7 +827,9 @@ export default function Jobs() {
             </tbody>
           </table>
         </div>
-      )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

@@ -149,6 +149,46 @@ def test_list_nodes_falls_back_to_text_when_json_payload_has_no_nodes(monkeypatc
     assert nodes[0].labels["gpu_available"] == "3"
 
 
+def test_list_nodes_text_caches_unsupported_format(monkeypatch):
+    """Older SLURM rejects --Format=...,GresUsed. We probe once; subsequent
+    calls must skip the 5-column probe to avoid logging WARNING every tick."""
+    backend = SlurmBackend()
+    five_col = ["sinfo", "--Node", "--noheader", "--Format=NodeList,Partition,StateLong,Gres,GresUsed"]
+    four_col = ["sinfo", "--Node", "--noheader", "--Format=NodeList,Partition,StateLong,Gres"]
+    calls = []
+
+    def fake_run(args, capture_output, text, timeout):
+        calls.append(args)
+        if args == ["sinfo", "--json"]:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
+        if args == five_col:
+            # Mimic the actual SLURM error message that triggers fallback.
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=1,
+                stdout="",
+                stderr="sinfo: error: Invalid job format specification: GresUsed",
+            )
+        assert args == four_col
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="gpu-01 gpu-a100 idle gpu:a100:4\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("control_plane.core.backends.slurm.subprocess.run", fake_run)
+
+    backend.list_nodes()
+    backend.list_nodes()
+    backend.list_nodes()
+
+    five_col_attempts = [c for c in calls if c == five_col]
+    four_col_attempts = [c for c in calls if c == four_col]
+    assert len(five_col_attempts) == 1, "5-column probe should run only on the first call"
+    assert len(four_col_attempts) == 3, "4-column fallback should run every list_nodes() call"
+
+
 def test_list_nodes_json_uses_tres_when_gres_is_empty(monkeypatch):
     backend = SlurmBackend()
 

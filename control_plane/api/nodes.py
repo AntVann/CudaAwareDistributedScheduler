@@ -1,4 +1,3 @@
-import os
 import logging
 from typing import List
 
@@ -17,12 +16,19 @@ logger = logging.getLogger("control_plane.api.nodes")
 def list_nodes(request: Request, _authorized=Depends(require_user_or_admin)):
     """
     Return the current known nodes and their latest heartbeat payloads.
+
+    If the configured execution backend exposes node discovery (e.g. SLURM
+    via sinfo), use it as the source of truth. Otherwise read whatever was
+    stored via agent heartbeats.
     """
     scheduler = getattr(request.app.state, "scheduler", None)
     backend = getattr(scheduler, "backend", None)
-    if os.getenv("BACKEND", "redis-agent").strip().lower() == "slurm" and backend is not None:
+    if backend is not None and hasattr(backend, "list_nodes"):
         recent_secs = getattr(scheduler, "recent_secs", 30)
-        return backend.list_nodes(recent_secs=recent_secs)
+        try:
+            return backend.list_nodes(recent_secs=recent_secs)
+        except Exception:
+            logger.exception("Backend list_nodes() failed; falling back to persisted heartbeats")
     return persist_list_nodes()
 
 

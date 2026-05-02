@@ -125,19 +125,31 @@ export default function Dashboard() {
         <Card>
           <div className="mb-1 flex items-center gap-2 text-sm text-text-secondary">
             <HealthDot ok={ready?.postgres?.ok ?? null} />
-            PostgreSQL
+            {ready?.postgres?.mode === "sqlite" ? "SQLite" : "PostgreSQL"}
           </div>
           <p className="font-mono text-xs text-text-muted">
-            {ready?.postgres ? (ready.postgres.ok ? "Connected" : "Down") : "Loading..."}
+            {ready?.postgres
+              ? ready.postgres.ok
+                ? ready.postgres.mode === "sqlite"
+                  ? "OK"
+                  : "Connected"
+                : "Down"
+              : "Loading..."}
           </p>
         </Card>
         <Card>
           <div className="mb-1 flex items-center gap-2 text-sm text-text-secondary">
             <HealthDot ok={ready?.redis?.ok ?? null} />
-            Redis
+            {ready?.redis?.mode === "memory" ? "In-Memory Queue" : "Redis"}
           </div>
           <p className="font-mono text-xs text-text-muted">
-            {ready?.redis ? (ready.redis.ok ? "Connected" : "Down") : "Loading..."}
+            {ready?.redis
+              ? ready.redis.ok
+                ? ready.redis.mode === "memory"
+                  ? "OK"
+                  : "Connected"
+                : "Down"
+              : "Loading..."}
           </p>
         </Card>
       </div>
@@ -168,7 +180,9 @@ export default function Dashboard() {
           <p className="mb-1 text-sm text-text-secondary">Queue Depth</p>
           <MetricValue value={metrics?.queue_depth ?? 0} />
           <p className="mt-2 text-xs text-text-muted">
-            Based on Redis `jobs:queue` length.
+            {ready?.redis?.mode === "memory"
+              ? "Pending jobs waiting for placement (in-memory queue)."
+              : "Based on Redis `jobs:queue` length."}
           </p>
         </Card>
         <Card>
@@ -246,7 +260,13 @@ export default function Dashboard() {
                 Active: <span className="font-mono text-text-primary">{policies?.active ?? "-"}</span>
               </p>
             </div>
-            <span className="text-xs text-text-muted">{token ? "API token set" : "Read-only mode"}</span>
+            <span
+              className={`text-xs ${
+                token ? "text-text-muted" : "text-state-queued"
+              }`}
+            >
+              {token ? "API token set" : "Read-only — admin token required to change policy"}
+            </span>
           </div>
           <div className="flex flex-wrap gap-2">
             {policies?.supported.map((policy) => (
@@ -254,7 +274,19 @@ export default function Dashboard() {
                 key={policy}
                 type="button"
                 onClick={() => handlePolicyChange(policy)}
-                disabled={updatingPolicy || !policies || policies.active === policy}
+                disabled={
+                  updatingPolicy ||
+                  !policies ||
+                  policies.active === policy ||
+                  !token
+                }
+                title={
+                  !token
+                    ? "Read-only mode: enter an admin token in the sidebar to switch policies"
+                    : policies?.active === policy
+                      ? "Already the active policy"
+                      : undefined
+                }
                 className={`rounded-md border px-3 py-2 text-xs font-medium transition-colors ${
                   policies?.active === policy
                     ? "border-accent bg-accent/10 text-accent"
