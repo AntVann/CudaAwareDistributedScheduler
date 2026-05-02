@@ -1,0 +1,185 @@
+# Improvements Tracker
+
+Findings from a live walkthrough of the dashboard against the SLURM control plane on `coe-hpc1`. Each item lists what was observed, why it matters, and a starting point for the fix. Work through them one at a time.
+
+---
+
+## Bugs
+
+### 1. Nodes page is empty even though jobs get placed on `condo1` — FIXED
+
+**Observed:** `/nodes` showed "No nodes registered yet." Dashboard tile "Node Freshness" showed `Total: 0`. But the Jobs page showed multiple jobs scheduled on `condo1`.
+
+**Root cause(s):** Two independent bugs.
+1. **Older SLURM rejects `GresUsed`.** `sinfo --Format=...,GresUsed` returns `Invalid job format specification: GresUsed`, so the text-parse fallback never produced rows. Fixed by retrying without `GresUsed` if the 5-column form fails (`control_plane/core/backends/slurm.py`, new `_run_sinfo_text` helper).
+2. **`/api/nodes` was gated on `os.getenv("BACKEND") == "slurm"` re-read at request time.** When the env var wasn't visible to the request worker, the endpoint silently fell back to `persist_list_nodes()` which returned `[]`. Fixed by detecting the capability via `hasattr(backend, "list_nodes")` instead (`control_plane/api/nodes.py`).
+
+**Verified:** Nodes page now shows `condo1` with `draining` state, partitions `compute,condo,gpu,lque`, and "2 GPUs available". `GET /api/nodes` returns the node with proper labels.
+
+---
+
+### 2. Misleading service badges on the Dashboard — FIXED
+
+**Observed:** Dashboard showed "PostgreSQL Connected" and "Redis Connected" with green dots. Active config is `BACKEND=slurm`, `DATABASE_URL=sqlite://...`, `QUEUE_BACKEND=memory` — neither service was in use.
+
+**Fix:** `/ready` already returns a `mode` field per subsystem (`"sqlite"`/`"memory"` in this deployment). Frontend now uses it to relabel the cards:
+
+- Storage card: shows "SQLite / OK" when `ready.postgres.mode === "sqlite"`, otherwise "PostgreSQL / Connected".
+- Queue card: shows "In-Memory Queue / OK" when `ready.redis.mode === "memory"`, otherwise "Redis / Connected".
+
+Files: `frontend/src/api/client.ts` (added `mode` to `ReadyResponse`), `frontend/src/pages/Dashboard.tsx` (conditional labels).
+
+**Verified:** Dashboard now reads "SQLite OK" and "In-Memory Queue OK" against the live HPC control plane.
+
+---
+
+### 3. "Based on Redis `jobs:queue` length" caption is wrong in SLURM mode — FIXED
+
+**Observed:** Queue Depth tile literally referenced Redis even when the queue backend was `memory`.
+
+**Fix:** Same `ready.redis.mode` switch as #2 — Queue Depth caption now reads "Pending jobs waiting for placement (in-memory queue)." in SLURM/SQLite mode and falls back to the original Redis caption when running against the real Redis-agent backend.
+
+Files: `frontend/src/pages/Dashboard.tsx`.
+
+**Verified:** Live dashboard shows the correct caption.
+
+---
+
+### 4. Failed placement leaves jobs in `QUEUED` with no reason
+
+**Observed:** `test-001` shows `QUEUED`, no SLURM ID, no node, `Reason: -`. There is no way to tell from the UI why placement didn't happen.
+
+**Why it matters:** "Stuck in queue" is the most common debugging scenario for an HPC user. Surfacing a reason ("no nodes match GPU request", "partition unreachable", etc.) avoids hours of sshing around.
+
+**Where to look:** Scheduler placement loop in `control_plane/core/scheduler.py` (or wherever the QUEUED→PLACED transition is decided). On a no-op cycle, persist a structured reason on the job row.
+
+---
+
+### 5. Failed jobs show "FAILED" but no log pointer — FIXED (with #8)
+
+**Observed:** `test-002` failed with exit code `127` (command not found). The Reason column just said `FAILED`. The actual stderr/stdout were in `SLURM_LOG_DIR` on the cluster but the UI gave no path.
+
+**Fix:** SLURM submit already writes deterministic paths (`{log_dir}/{job_id}-{slurm_id}.{out|err}`), so no schema migration was needed. The backend learned to compute and read them on demand. See #8 for the full implementation — these two issues collapsed into one feature.
+
+---
+
+### 6. Latency tiles read 0 despite completed jobs
+
+**Observed:** Dashboard shows `Run P50: 0`, `Run P95: 0` even with `test-003` and `live-test-1` having completed timestamps. Placement P50/P95 do show non-zero values.
+
+**Why it matters:** These tiles are part of the "scheduler observability" pitch. If they're empty, the dashboard looks broken.
+
+**Where to look:** `/api/metrics/summary` handler. The run-latency calc is likely only counting jobs that transitioned in-process during the current uptime, ignoring rows hydrated from SQLite at boot. Also confirm the timestamps schema actually contains `started`/`finished` for SLURM-completed jobs.
+
+---
+
+## UX gaps
+
+### 7. No cancel button
+
+**Observed:** `CANCELLED` is in the documented lifecycle. The backend supports `scancel`. The Jobs UI has no way to cancel.
+
+**Why it matters:** Standard scheduler operation. Without it, the only cancel path is sshing in.
+
+**Where to look:** Add `DELETE /api/jobs/{id}` (or `POST /api/jobs/{id}/cancel`) that calls the backend's `cancel`. UI: a Cancel button in the row expansion, gated on `state ∈ {QUEUED, PLACED, RUNNING}` and on having an operator token.
+
+---
+
+### 8. No logs view in the UI — FIXED (paired with #5)
+
+**Observed:** Even for completed jobs there was no way to see stdout/stderr in the dashboard.
+
+**Fix:**
+
+- Backend: added `SlurmBackend.log_paths(job_id)` and `SlurmBackend.read_logs(job_id, stream, tail)` to the SLURM backend. Paths are derived from `{SLURM_LOG_DIR}/{job_id}-{slurm_id}.{out|err}` — the same template `_generate_batch_script` writes into the `#SBATCH --output/--error` directives. `read_logs` reads the file with utf-8/replace error handling, returns the last `tail` lines, and reports `exists`, `bytes_total`, `lines`, and `truncated` so the UI can show "file not yet written" vs. "showing tail of N lines".
+- API: added `GET /api/jobs/{job_id}/logs?stream=stdout|stderr&tail=N`. `stream` is validated via FastAPI `Query(pattern=...)`, `tail` is clamped 1..5000. Returns `404` if the job has no `backend_ref` yet (never submitted to SLURM), `501` if the active backend doesn't expose `read_logs` (e.g. redis-agent backend), and `200` with the payload otherwise. Crucially the endpoint returns `200 + exists:false` for the "submitted but no output yet" case so the UI can render the path even before the file is on disk.
+- Frontend: `frontend/src/api/client.ts` exports `JobLogsResponse` and `fetchJobLogs(jobId, stream, tail)`. `frontend/src/pages/Jobs.tsx` adds a `JobLogsPanel` component embedded in the row expansion: stderr / stdout toggle, a refresh button, the absolute path + lines/bytes/truncation hint, and a scrollable `<pre>` block with the tail. When the job has no SLURM ID yet, it renders a friendly placeholder instead of a 404.
+
+Files: `control_plane/core/backends/slurm.py`, `control_plane/api/jobs.py`, `frontend/src/api/client.ts`, `frontend/src/pages/Jobs.tsx`.
+
+**Verified:** Live `GET /api/jobs/trace-001/logs?stream=stderr&tail=50` returns the correct path (`/tmp/scheduler-logs/trace-001-112362.err`), `exists=true`, full 11-line content, and 523-byte total. Dashboard row expansion renders the same payload as a tailed code block under a "Logs" panel, with stderr/stdout toggle and refresh wired to the endpoint.
+
+Stretch goal still open: SSE-based live tailing instead of pull-on-click + manual refresh. Not worth doing until we're tailing genuinely long-running jobs.
+
+---
+
+### 9. Policy buttons appear active in read-only mode
+
+**Observed:** Sidebar says "Read-only mode" when no operator token is set, but the FIFO / ROUND_ROBIN / BINPACK buttons on the Dashboard look fully clickable. Clicking them silently fails.
+
+**Why it matters:** Confusing — looks like the policy switch is broken when really the user just hasn't authenticated.
+
+**Where to look:** `Dashboard.tsx` policy panel. Disable buttons (visually grayed out + `disabled` attribute) when `!token`. The card already has a "Read-only mode" label on the right; tie that to actual button state.
+
+---
+
+### 10. Jobs table has no filtering, search, or sort
+
+**Observed:** Plain table, ordered by some implicit default. No state filter, no job-id search.
+
+**Why it matters:** Once the SQLite DB has hundreds of rows from past runs, the table is unusable.
+
+**Where to look:** `frontend/src/pages/Jobs.tsx`. Add: state multi-select, job-id substring filter, time-range filter, click-to-sort headers. Either client-side (cheap, fine up to ~1k rows) or push down to `/api/jobs?state=...&limit=...` query params.
+
+---
+
+### 11. Auto-refresh is opt-in and off by default
+
+**Observed:** Checkbox at top of Jobs page, unchecked initially. Dashboard probably also static.
+
+**Why it matters:** This is a live ops dashboard. The default should be live.
+
+**Where to look:** `Jobs.tsx` and `Dashboard.tsx` — flip default state, polling at 3–5s. Optionally: switch to SSE / websockets so we don't poll.
+
+---
+
+## Operational / scope
+
+### 12. No retention or "last N hours" filter
+
+**Observed:** Dashboard counters and Jobs table accumulate forever from SQLite. Old demo runs pollute the live view.
+
+**Why it matters:** Can't tell what just happened vs. what happened a week ago. Eventually impacts performance too.
+
+**Where to look:** Add a time-window param to `/api/jobs` and `/api/metrics/summary`. Optionally a soft archive flag on old rows.
+
+---
+
+### 13. Submit form exposes only `cmd` / `gpus` / `partition`
+
+**Observed:** The `JobSpec` model defines `cpu`, `mem_gb`, `priority`, `env`. None of those are in the Submit Test Job form.
+
+**Why it matters:** Forces users to drop to curl for any non-trivial job. We support more than we expose.
+
+**Where to look:** `frontend/src/pages/Jobs.tsx` submit panel. Add the missing fields. Probably also rename the button — "Submit Test Job" undersells it.
+
+---
+
+### 14. No "why this node?" decision trace per job — FIXED
+
+**Observed:** Job rows showed `Node: condo1` but no record of *why* — FIFO first match, BINPACK best fit, or RR rotation?
+
+**Fix:**
+
+- Schema: added `placement_decision TEXT` (SQLite) / `JSONB` (Postgres) column to `jobs`. SQLite migration runs idempotently in `bootstrap_storage()` via `PRAGMA table_info(jobs)` + `ALTER TABLE ... ADD COLUMN`.
+- Scheduler: `NaiveScheduler._select_node()` now returns `(node_id, decision_dict)`. The decision blob captures: `policy`, `partition`, `requested_gpus`, `chosen_node_id`, `chosen_reason` (per-policy human-readable why), `candidates` (every recently-seen node with `available_gpu / gpu_count / avg_utilization / partitions / state / eligible / selected` plus `rejected_reason` when filtered out and `score` for BINPACK), `decided_at`, optional `round_robin_pointer` for RR.
+- Persistence: `place_job(job_id, node_id, decision=...)` writes the blob alongside the PLACED transition. Backfilled into `list_jobs()` row dicts.
+- UI: Jobs row expansion now renders a "Placement decision" panel — top summary (policy / partition / requested GPUs / why / decided-at), then a candidates table where the chosen node is highlighted, eligible alternatives are shown in normal text, and rejected nodes show the rejection reason in muted text.
+
+Files: `control_plane/core/persistence.py`, `control_plane/core/scheduler.py`, `control_plane/db/schema.sql`, `frontend/src/api/client.ts`, `frontend/src/pages/Jobs.tsx`.
+
+**Verified:** `_select_node` invoked with three synthetic candidates (condo1 idle gpu, gpu7 mix gpu, gpu9 idle compute-only) produces the expected blob — condo1 selected by FIFO, gpu9 rejected with "partition mismatch (need gpu, have compute)". Same blob round-trips through SQLite and renders correctly in the live Jobs page row expansion.
+
+Stretch goal still open: a "policy comparison" page that replays a queue under FIFO/RR/BINPACK and shows makespan/utilization deltas.
+
+---
+
+## Suggested order
+
+1. **#1 (Nodes empty)** — foundation; everything else assumes it works.
+2. **#14 (Decision trace)** — the killer differentiator.
+3. **#5 + #8 (Logs)** — the most-asked operator feature.
+4. **#7 (Cancel)** — completes the lifecycle.
+5. **#4, #6 (Reasons + latency)** — credibility fixes.
+6. **#2, #3, #9, #11 (UI honesty + defaults)** — quick wins.
+7. **#10, #12, #13 (filtering, retention, full submit form)** — usability polish.

@@ -3,10 +3,12 @@ import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
 import { useOperatorAuth } from "../auth-context";
 import {
+  fetchJobLogs,
   fetchJobs,
   submitJob,
-  type JobListItem,
   type EnqueueResponse,
+  type JobListItem,
+  type JobLogsResponse,
 } from "../api/client";
 
 function formatTs(ts: number | null | undefined): string {
@@ -17,6 +19,118 @@ function formatTs(ts: number | null | undefined): string {
 function truncate(s: string | null | undefined, max = 60): string {
   if (!s) return "-";
   return s.length > max ? s.slice(0, max) + "..." : s;
+}
+
+function JobLogsPanel({
+  jobId,
+  hasBackendRef,
+  token,
+}: {
+  jobId: string;
+  hasBackendRef: boolean;
+  token: string;
+}) {
+  const [stream, setStream] = useState<"stdout" | "stderr">("stderr");
+  const [logs, setLogs] = useState<JobLogsResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadLogs = useCallback(
+    async (which: "stdout" | "stderr") => {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await fetchJobLogs(jobId, which, token, 200);
+        setLogs(data);
+        setStream(which);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load logs");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [jobId, token],
+  );
+
+  if (!hasBackendRef) {
+    return (
+      <div className="mt-4 rounded-md border border-border bg-surface-1 p-3 text-xs text-text-muted">
+        No SLURM job ID yet — logs are available once the job is dispatched to SLURM.
+      </div>
+    );
+  }
+
+  if (!token) {
+    return (
+      <div className="mt-4 rounded-md border border-border bg-surface-1 p-3 text-xs text-text-muted">
+        Bearer token required to fetch logs.
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 rounded-md border border-border bg-surface-1 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-xs font-medium text-text-secondary">Logs</span>
+        <div className="flex gap-2">
+          <button
+            onClick={() => loadLogs("stderr")}
+            className={`rounded px-2 py-1 text-xs ${
+              stream === "stderr" && logs
+                ? "bg-accent text-white"
+                : "border border-border text-text-secondary hover:bg-surface-2"
+            }`}
+          >
+            stderr
+          </button>
+          <button
+            onClick={() => loadLogs("stdout")}
+            className={`rounded px-2 py-1 text-xs ${
+              stream === "stdout" && logs
+                ? "bg-accent text-white"
+                : "border border-border text-text-secondary hover:bg-surface-2"
+            }`}
+          >
+            stdout
+          </button>
+          {logs && (
+            <button
+              onClick={() => loadLogs(stream)}
+              className="rounded border border-border px-2 py-1 text-xs text-text-secondary hover:bg-surface-2"
+            >
+              ↻ Refresh
+            </button>
+          )}
+        </div>
+      </div>
+      {error && <p className="text-xs text-state-failed">{error}</p>}
+      {loading && <p className="text-xs text-text-muted">Loading {stream}...</p>}
+      {!loading && !logs && !error && (
+        <p className="text-xs text-text-muted">Click stderr or stdout to view the tail.</p>
+      )}
+      {logs && (
+        <div className="space-y-2">
+          <p className="font-mono text-[11px] text-text-muted break-all">
+            {logs.path}
+            {logs.exists
+              ? ` · ${logs.lines} line${logs.lines === 1 ? "" : "s"}${
+                  logs.truncated ? " (tail)" : ""
+                } · ${logs.bytes_total} bytes`
+              : " · file not yet written"}
+          </p>
+          {logs.exists ? (
+            <pre className="max-h-80 overflow-auto rounded bg-surface-0 p-2 font-mono text-[11px] text-text-secondary whitespace-pre-wrap">
+              {logs.content || "(empty)"}
+            </pre>
+          ) : (
+            <p className="text-xs text-text-muted">
+              SLURM hasn't written this stream yet. Try refresh once the job is RUNNING or terminal.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 const PARTITION_OPTIONS = [
@@ -329,6 +443,95 @@ export default function Jobs() {
                             </div>
                           )}
                         </div>
+
+                        <JobLogsPanel jobId={job.job_id} hasBackendRef={!!job.backend_ref} token={token} />
+
+                        {job.placement_decision && (
+                          <div className="mt-4 rounded-md border border-border bg-surface-1 p-3">
+                            <div className="mb-2 text-xs font-medium text-text-secondary">
+                              Placement decision
+                            </div>
+                            <div className="mb-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                              <div>
+                                <span className="text-text-muted">Policy:</span>{" "}
+                                <span className="font-mono text-accent">
+                                  {job.placement_decision.policy}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-text-muted">Partition:</span>{" "}
+                                <span className="font-mono text-text-secondary">
+                                  {job.placement_decision.partition ?? "any"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-text-muted">Requested GPUs:</span>{" "}
+                                <span className="font-mono text-text-secondary">
+                                  {job.placement_decision.requested_gpus}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-text-muted">Decided at:</span>{" "}
+                                <span className="font-mono text-text-secondary">
+                                  {formatTs(job.placement_decision.decided_at)}
+                                </span>
+                              </div>
+                              <div className="col-span-full">
+                                <span className="text-text-muted">Why:</span>{" "}
+                                <span className="font-mono text-text-secondary">
+                                  {job.placement_decision.chosen_reason}
+                                </span>
+                              </div>
+                            </div>
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="text-text-muted">
+                                  <th className="text-left font-medium px-2 py-1">Node</th>
+                                  <th className="text-left font-medium px-2 py-1">Avail/Total GPU</th>
+                                  <th className="text-left font-medium px-2 py-1">Util</th>
+                                  <th className="text-left font-medium px-2 py-1">Partitions</th>
+                                  <th className="text-left font-medium px-2 py-1">State</th>
+                                  <th className="text-left font-medium px-2 py-1">Result</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {job.placement_decision.candidates.map((cand) => (
+                                  <tr
+                                    key={cand.node_id}
+                                    className={
+                                      cand.selected
+                                        ? "bg-state-done/10"
+                                        : cand.eligible
+                                          ? ""
+                                          : "text-text-muted"
+                                    }
+                                  >
+                                    <td className="font-mono px-2 py-1">{cand.node_id}</td>
+                                    <td className="font-mono px-2 py-1">
+                                      {cand.available_gpu}/{cand.gpu_count}
+                                    </td>
+                                    <td className="font-mono px-2 py-1">
+                                      {(cand.avg_utilization * 100).toFixed(0)}%
+                                    </td>
+                                    <td className="font-mono px-2 py-1">
+                                      {cand.partitions.join(",") || "-"}
+                                    </td>
+                                    <td className="font-mono px-2 py-1">{cand.state || "-"}</td>
+                                    <td className="px-2 py-1">
+                                      {cand.selected ? (
+                                        <span className="text-state-done font-medium">SELECTED</span>
+                                      ) : cand.eligible ? (
+                                        <span className="text-text-secondary">eligible</span>
+                                      ) : (
+                                        <span className="text-text-muted">{cand.rejected_reason}</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   )}

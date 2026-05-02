@@ -125,19 +125,31 @@ export default function Dashboard() {
         <Card>
           <div className="mb-1 flex items-center gap-2 text-sm text-text-secondary">
             <HealthDot ok={ready?.postgres?.ok ?? null} />
-            PostgreSQL
+            {ready?.postgres?.mode === "sqlite" ? "SQLite" : "PostgreSQL"}
           </div>
           <p className="font-mono text-xs text-text-muted">
-            {ready?.postgres ? (ready.postgres.ok ? "Connected" : "Down") : "Loading..."}
+            {ready?.postgres
+              ? ready.postgres.ok
+                ? ready.postgres.mode === "sqlite"
+                  ? "OK"
+                  : "Connected"
+                : "Down"
+              : "Loading..."}
           </p>
         </Card>
         <Card>
           <div className="mb-1 flex items-center gap-2 text-sm text-text-secondary">
             <HealthDot ok={ready?.redis?.ok ?? null} />
-            Redis
+            {ready?.redis?.mode === "memory" ? "In-Memory Queue" : "Redis"}
           </div>
           <p className="font-mono text-xs text-text-muted">
-            {ready?.redis ? (ready.redis.ok ? "Connected" : "Down") : "Loading..."}
+            {ready?.redis
+              ? ready.redis.ok
+                ? ready.redis.mode === "memory"
+                  ? "OK"
+                  : "Connected"
+                : "Down"
+              : "Loading..."}
           </p>
         </Card>
       </div>
@@ -168,7 +180,9 @@ export default function Dashboard() {
           <p className="mb-1 text-sm text-text-secondary">Queue Depth</p>
           <MetricValue value={metrics?.queue_depth ?? 0} />
           <p className="mt-2 text-xs text-text-muted">
-            Based on Redis `jobs:queue` length.
+            {ready?.redis?.mode === "memory"
+              ? "Pending jobs waiting for placement (in-memory queue)."
+              : "Based on Redis `jobs:queue` length."}
           </p>
         </Card>
         <Card>

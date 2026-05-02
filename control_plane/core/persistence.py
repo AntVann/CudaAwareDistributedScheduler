@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   gpu_ids TEXT,
   timestamps TEXT,
   exit_code INTEGER,
-  reason TEXT
+  reason TEXT,
+  placement_decision TEXT
 );
 
 CREATE TABLE IF NOT EXISTS nodes (
@@ -353,6 +354,9 @@ def bootstrap_storage():
         logger.info("Ensuring sqlite schema exists at %s", _sqlite_path())
         with _sqlite_conn() as conn:
             conn.executescript(_SQLITE_SCHEMA)
+            existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+            if "placement_decision" not in existing_cols:
+                conn.execute("ALTER TABLE jobs ADD COLUMN placement_decision TEXT")
         return
 
     logger.info("Ensuring schema exists via %s", _SCHEMA_PATH)
@@ -749,7 +753,8 @@ def get_job_spec(job_id: str) -> Optional[JobSpec]:
     return JobSpec.model_validate(spec_payload)
 
 
-def place_job(job_id: str, node_id: str) -> None:
+def place_job(job_id: str, node_id: str, decision: Optional[Dict[str, Any]] = None) -> None:
+    decision_json = json.dumps(decision) if decision is not None else None
     if _use_sqlite():
         ts = time.time()
         with _sqlite_conn() as conn:
@@ -761,10 +766,10 @@ def place_job(job_id: str, node_id: str) -> None:
             conn.execute(
                 """
                 UPDATE jobs
-                SET status=?, node_id=?, timestamps=?
+                SET status=?, node_id=?, timestamps=?, placement_decision=COALESCE(?, placement_decision)
                 WHERE job_id=?
                 """,
-                (JobState.PLACED.value, node_id, json.dumps(timestamps), job_id),
+                (JobState.PLACED.value, node_id, json.dumps(timestamps), decision_json, job_id),
             )
         return
 
@@ -775,10 +780,11 @@ def place_job(job_id: str, node_id: str) -> None:
                 UPDATE jobs
                 SET status=%s,
                     node_id=%s,
-                    timestamps = coalesce(timestamps, '{}'::jsonb) || %s::jsonb
+                    timestamps = coalesce(timestamps, '{}'::jsonb) || %s::jsonb,
+                    placement_decision = COALESCE(%s::jsonb, placement_decision)
                 WHERE job_id=%s
                 """,
-                ("PLACED", node_id, json.dumps({"placed": time.time()}), job_id),
+                ("PLACED", node_id, json.dumps({"placed": time.time()}), decision_json, job_id),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"Job {job_id} not found")
@@ -933,7 +939,7 @@ def list_jobs(is_admin: bool = False, projects: Optional[List[str]] = None) -> L
         with _sqlite_conn() as conn:
             rows = conn.execute(
                 """
-                SELECT job_id, spec, status, backend_ref, node_id, gpu_ids, timestamps, exit_code, reason
+                SELECT job_id, spec, status, backend_ref, node_id, gpu_ids, timestamps, exit_code, reason, placement_decision
                 FROM jobs
                 """
             ).fetchall()
@@ -955,6 +961,7 @@ def list_jobs(is_admin: bool = False, projects: Optional[List[str]] = None) -> L
                     "timestamps": timestamps,
                     "exit_code": row["exit_code"],
                     "reason": row["reason"],
+                    "placement_decision": _json_load(row["placement_decision"], None),
                 }
             )
         result.sort(key=lambda item: float((item.get("timestamps") or {}).get("enqueued", 0.0)), reverse=True)
@@ -967,7 +974,7 @@ def list_jobs(is_admin: bool = False, projects: Optional[List[str]] = None) -> L
         with _cursor(conn, cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 f"""
-                SELECT job_id, project, status, backend_ref, node_id, gpu_ids, timestamps, exit_code, reason
+                SELECT job_id, project, status, backend_ref, node_id, gpu_ids, timestamps, exit_code, reason, placement_decision
                 FROM jobs
                 {clause}
                 ORDER BY (timestamps->>'enqueued')::float DESC NULLS LAST
@@ -989,6 +996,7 @@ def list_jobs(is_admin: bool = False, projects: Optional[List[str]] = None) -> L
                 "timestamps": row["timestamps"] or {},
                 "exit_code": row["exit_code"],
                 "reason": row["reason"],
+                "placement_decision": row.get("placement_decision"),
             }
         )
     return result

@@ -29,8 +29,8 @@ export interface HealthResponse {
 
 export interface ReadyResponse {
   ok: boolean;
-  postgres: { ok: boolean; [k: string]: unknown };
-  redis: { ok: boolean; [k: string]: unknown };
+  postgres: { ok: boolean; mode?: string; path?: string; [k: string]: unknown };
+  redis: { ok: boolean; mode?: string; [k: string]: unknown };
 }
 
 export const fetchHealth = () => request<HealthResponse>("/health");
@@ -49,6 +49,30 @@ export const fetchMe = (token: string) =>
   });
 
 // Jobs
+export interface PlacementCandidate {
+  node_id: string;
+  gpu_count: number;
+  available_gpu: number;
+  avg_utilization: number;
+  partitions: string[];
+  state: string;
+  eligible: boolean;
+  selected: boolean;
+  rejected_reason?: string;
+  score?: number;
+}
+
+export interface PlacementDecision {
+  policy: string;
+  partition: string | null;
+  requested_gpus: number;
+  chosen_node_id: string;
+  chosen_reason: string;
+  candidates: PlacementCandidate[];
+  decided_at: number;
+  round_robin_pointer?: number;
+}
+
 export interface JobListItem {
   job_id: string;
   project: string;
@@ -59,6 +83,7 @@ export interface JobListItem {
   timestamps: Record<string, number | null>;
   exit_code: number | null;
   reason: string | null;
+  placement_decision: PlacementDecision | null;
 }
 
 export interface JobSummary {
@@ -94,6 +119,17 @@ export interface JobSpec {
   metadata?: Record<string, unknown>;
 }
 
+export interface JobLogsResponse {
+  stream: "stdout" | "stderr";
+  path: string;
+  exists: boolean;
+  content: string;
+  lines: number;
+  bytes_total: number;
+  truncated: boolean;
+  error?: string;
+}
+
 export const fetchJobs = (token: string) => request<JobListItem[]>("/api/jobs", { token });
 export const fetchJobSummary = (token: string) => request<JobSummary>("/api/jobs/summary", { token });
 export const submitJob = (spec: JobSpec, token: string) =>
@@ -103,6 +139,16 @@ export const submitJob = (spec: JobSpec, token: string) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(spec),
   });
+export const fetchJobLogs = (
+  jobId: string,
+  stream: "stdout" | "stderr",
+  token: string,
+  tail = 200,
+) =>
+  request<JobLogsResponse>(
+    `/api/jobs/${encodeURIComponent(jobId)}/logs?stream=${stream}&tail=${tail}`,
+    { token },
+  );
 
 // Nodes
 export interface GpuInfo {

@@ -162,35 +162,25 @@ class SlurmBackend(ExecutionBackend):
 
     def _list_nodes_text(self) -> List[NodeInfo]:
         """Parse sinfo text output for older SLURM versions."""
-        result = subprocess.run(
-            [
-                "sinfo",
-                "--Node",
-                "--noheader",
-                "--Format=NodeList,Partition,StateLong,Gres,GresUsed",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            logger.warning("sinfo text fallback failed: %s", (result.stderr or "").strip())
+        # Prefer the 5-column form (with GresUsed) on modern SLURM. Fall back
+        # to the 4-column form when GresUsed is rejected as an unknown field
+        # (e.g. SLURM < 20.11 on coe-hpc1: "Invalid job format specification: GresUsed").
+        rows = self._run_sinfo_text("NodeList,Partition,StateLong,Gres,GresUsed")
+        if rows is None:
+            rows = self._run_sinfo_text("NodeList,Partition,StateLong,Gres")
+        if rows is None:
             return []
 
         # Aggregate partitions per node since sinfo prints one row per node-partition pair.
         node_map: Dict[str, dict] = {}
-        for line in (result.stdout or "").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split(None, 4)
-            if len(parts) < 5:
+        for parts in rows:
+            if len(parts) < 4:
                 continue
             node_id = parts[0].strip()
             partition = parts[1].strip().rstrip("*")  # Remove default partition marker
             state = parts[2].strip()
             gres = parts[3].strip()
-            gres_used = parts[4].strip()
+            gres_used = parts[4].strip() if len(parts) >= 5 else ""
             if not node_id:
                 continue
             if node_id not in node_map:
@@ -203,8 +193,19 @@ class SlurmBackend(ExecutionBackend):
             partition_label = ",".join(sorted(info["partitions"]))
             state_label = info["state"]
             gpu_count = self._parse_gres(info["gres"])
-            gpu_used = self._parse_gres(info.get("gres_used", ""))
+            gpu_used_raw = info.get("gres_used", "")
+            gpu_used = self._parse_gres(gpu_used_raw) if gpu_used_raw else 0
             gpu_available = max(gpu_count - gpu_used, 0)
+            labels = {
+                "partition": partition_label,
+                "state": state_label,
+                "gpu_total": str(gpu_count),
+            }
+            # Only emit gpu_used/gpu_available when GresUsed was actually returned;
+            # otherwise the scheduler infers availability from state.
+            if gpu_used_raw:
+                labels["gpu_used"] = str(gpu_used)
+                labels["gpu_available"] = str(gpu_available)
             gpus = [
                 GpuInfo(index=i, name="unknown", mem_total_mb=0, utilization=0.0, mem_used_mb=0)
                 for i in range(gpu_count)
@@ -213,18 +214,36 @@ class SlurmBackend(ExecutionBackend):
                 NodeInfo(
                     node_id=node_id,
                     gpus=gpus,
-                    labels={
-                        "partition": partition_label,
-                        "state": state_label,
-                        "gpu_total": str(gpu_count),
-                        "gpu_used": str(gpu_used),
-                        "gpu_available": str(gpu_available),
-                    },
+                    labels=labels,
                     agent_health={"heartbeat_ts": now},
                     last_seen=now,
                 )
             )
         return nodes
+
+    @staticmethod
+    def _run_sinfo_text(format_spec: str) -> Optional[List[List[str]]]:
+        """Run `sinfo --Node` with the given Format. Returns None on failure
+        (unknown field, sinfo error) so callers can try a simpler format."""
+        max_splits = format_spec.count(",")
+        result = subprocess.run(
+            ["sinfo", "--Node", "--noheader", f"--Format={format_spec}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        stderr = (result.stderr or "").strip()
+        if result.returncode != 0 or "Invalid job format specification" in stderr:
+            if stderr:
+                logger.warning("sinfo --Format=%s failed: %s", format_spec, stderr)
+            return None
+        rows: List[List[str]] = []
+        for line in (result.stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(line.split(None, max_splits))
+        return rows
 
     def cancel(self, job_id: str) -> bool:
         slurm_id = get_backend_ref(job_id)
@@ -237,6 +256,58 @@ class SlurmBackend(ExecutionBackend):
             timeout=10,
         )
         return result.returncode == 0
+
+    def log_paths(self, job_id: str) -> Optional[Dict[str, str]]:
+        """Return the absolute paths of the SLURM stdout/stderr files for a job, if known."""
+        slurm_id = get_backend_ref(job_id)
+        if not slurm_id:
+            return None
+        return {
+            "stdout": str(self.log_dir / f"{job_id}-{slurm_id}.out"),
+            "stderr": str(self.log_dir / f"{job_id}-{slurm_id}.err"),
+        }
+
+    def read_logs(self, job_id: str, stream: str = "stderr", tail: int = 200) -> Optional[dict]:
+        """
+        Return the last `tail` lines of the named stream for a job.
+        Returns None if the job has no SLURM ID yet (never submitted).
+        Returns a dict with `path`, `content`, `lines`, `stream`, `exists`, `bytes_total`
+        when the SLURM ID is known — `content` may be empty if the file hasn't been
+        written yet (RUNNING job not flushed, or no output produced).
+        """
+        if stream not in ("stdout", "stderr"):
+            raise ValueError(f"stream must be 'stdout' or 'stderr', got {stream!r}")
+        paths = self.log_paths(job_id)
+        if paths is None:
+            return None
+        path = Path(paths[stream])
+        result: dict = {
+            "stream": stream,
+            "path": str(path),
+            "exists": path.exists(),
+            "content": "",
+            "lines": 0,
+            "bytes_total": 0,
+            "truncated": False,
+        }
+        if not path.exists():
+            return result
+        try:
+            stat = path.stat()
+            result["bytes_total"] = stat.st_size
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                # Simple tail: read all lines, keep last N. Fine for typical
+                # workload logs (MBs); worth replacing with seek-based tail
+                # if we ever ship multi-GB job output.
+                all_lines = fh.readlines()
+            tail_lines = all_lines[-tail:] if tail > 0 else all_lines
+            result["content"] = "".join(tail_lines)
+            result["lines"] = len(tail_lines)
+            result["truncated"] = len(tail_lines) < len(all_lines)
+        except Exception as exc:
+            logger.exception("Failed to read log %s for job %s", path, job_id)
+            result["error"] = str(exc)
+        return result
 
     def start(self) -> None:
         if not self.poller_enabled:

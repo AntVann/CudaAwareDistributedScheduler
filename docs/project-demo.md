@@ -16,6 +16,25 @@ Replace these placeholders before running commands:
 - `<agent-token>`: bearer token used by SLURM job callbacks
 - `<user-token>`: bearer token returned from admin approval when `TOKEN_DELIVERY_MODE=response`
 
+## Terminal layout
+
+Use 5 terminals. Two on the HPC (over SSH), three on your laptop. Keep them open for the whole demo — restart only the control plane (HPC #1) when you push code changes.
+
+| # | Where | Purpose | Command kept running |
+|---|-------|---------|----------------------|
+| 1 | HPC (`<hpc-login-node>`) | Control plane | `python3 -m uvicorn control_plane.app:app --host 0.0.0.0 --port 8088` |
+| 2 | HPC (`<hpc-login-node>`) | SLURM ops | ad-hoc: `squeue -u <your-id>`, `sacct -j ...`, `cat $SLURM_LOG_DIR/...` |
+| 3 | Laptop | SSH tunnel | `ssh -L 8088:<login-node>:8088 <your-id>@<hpc-login-node>` (leave it open, don't type other commands) |
+| 4 | Laptop | Vite dev server | `cd frontend && npm run dev` |
+| 5 | Laptop | Free terminal | ad-hoc: `curl`, `rsync` of code changes, `git`, etc. |
+
+Notes:
+
+- Terminal 1 owns the env vars (`OPERATOR_API_TOKEN`, etc.). After `Ctrl-C` in this terminal the env vars survive in the same shell — press ↑ + Enter to restart `uvicorn` with the same token.
+- When you change Python code locally, rsync the changed file from terminal 5 (laptop) to the HPC, then restart the control plane in terminal 1 with `Ctrl-C` + ↑ + Enter.
+- If terminal 5 is busy (e.g. you started a long-running curl), open a sixth ad-hoc one rather than tangling it.
+- Frontend changes are picked up by Vite hot-reload — no restart needed for terminal 4.
+
 ## 1. SSH to the cluster
 
 From your local machine:

@@ -1,7 +1,7 @@
 import logging
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from control_plane.api.auth import AuthPrincipal, require_user_or_admin
@@ -72,3 +72,48 @@ def read_job(
     if status is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return status
+
+
+@router.get("/jobs/{job_id}/logs")
+def read_job_logs(
+    job_id: str,
+    request: Request,
+    stream: str = Query("stderr", pattern="^(stdout|stderr)$"),
+    tail: int = Query(200, ge=1, le=5000),
+    principal: AuthPrincipal = Depends(require_user_or_admin),
+) -> Dict[str, Any]:
+    """
+    Return the tail of the SLURM stdout/stderr file for a job.
+    Requires a backend that exposes `read_logs(job_id, stream, tail)` (currently SLURM).
+    Project-scoped: callers must own (or admin) the job's project.
+    """
+    if get_job_status(job_id) is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not principal.is_admin:
+        project = get_job_project(job_id)
+        if project is None or project not in principal.projects:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    scheduler = getattr(request.app.state, "scheduler", None)
+    backend = getattr(scheduler, "backend", None)
+    if backend is None or not hasattr(backend, "read_logs"):
+        raise HTTPException(
+            status_code=501,
+            detail="Log retrieval not supported by the current backend",
+        )
+
+    try:
+        result = backend.read_logs(job_id, stream=stream, tail=tail)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to read logs for job %s", job_id)
+        raise HTTPException(status_code=500, detail="Failed to read logs") from exc
+
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No backend reference for this job (never submitted to SLURM)",
+        )
+    return result
