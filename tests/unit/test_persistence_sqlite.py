@@ -78,6 +78,65 @@ def test_sqlite_metrics_summary(monkeypatch, tmp_path):
     assert summary["windowed_terminal_counts"]["done"] == 1
 
 
+def test_sqlite_set_job_state_merges_caller_supplied_timestamps(monkeypatch, tmp_path):
+    """Regression for #6: when the SLURM poller jumps PLACED -> DONE in one tick
+    (because the job was very short), it passes timestamps={running: sacct_start,
+    done: sacct_end}. We must preserve `running` so the run-latency calc has
+    something to measure against."""
+    _configure_sqlite(monkeypatch, tmp_path)
+
+    spec = JobSpec(job_id="fast-job", project="default", image="", cmd=["true"], gpus=1)
+    persistence.enqueue_job(spec)
+    persistence.place_job("fast-job", "node-a")
+
+    # Simulate the poller catching a state transition from PLACED to DONE,
+    # with sacct having reported both Start (running) and End (done).
+    sacct_start = 1_000_000.0
+    sacct_end = 1_000_005.5
+    persistence.set_job_state(
+        "fast-job",
+        "DONE",
+        exit_code=0,
+        timestamps={"running": sacct_start, "done": sacct_end},
+    )
+
+    status = persistence.get_job_status("fast-job")
+    assert status is not None
+    assert status.state == JobState.DONE
+    # `running` was filled in from extras (no prior value).
+    assert status.timestamps.get("running") == sacct_start
+    # `done` was the new state's key, so the caller-supplied value wins over
+    # current wall clock.
+    assert status.timestamps.get("done") == sacct_end
+
+
+def test_sqlite_set_job_state_does_not_overwrite_existing_timestamps(monkeypatch, tmp_path):
+    """Caller-supplied extras must not clobber timestamps already on disk."""
+    _configure_sqlite(monkeypatch, tmp_path)
+
+    spec = JobSpec(job_id="slow-job", project="default", image="", cmd=["sleep"], gpus=1)
+    persistence.enqueue_job(spec)
+    persistence.place_job("slow-job", "node-a")
+    persistence.set_job_state("slow-job", "RUNNING")  # records running=now()
+
+    status_before = persistence.get_job_status("slow-job")
+    assert status_before is not None
+    running_before = status_before.timestamps["running"]
+
+    # Poller reports DONE later, with sacct's Start which differs from when
+    # we recorded RUNNING. We should keep our own recorded `running`.
+    persistence.set_job_state(
+        "slow-job",
+        "DONE",
+        exit_code=0,
+        timestamps={"running": 0.0, "done": 1_999_999.0},
+    )
+    status_after = persistence.get_job_status("slow-job")
+    assert status_after is not None
+    assert status_after.timestamps["running"] == running_before  # unchanged
+    assert status_after.timestamps["done"] == 1_999_999.0
+
+
 def test_sqlite_bootstrap_admin_token_and_resolve(monkeypatch, tmp_path):
     _configure_sqlite(monkeypatch, tmp_path)
     monkeypatch.setenv("AUTH_MODE", "token")

@@ -865,29 +865,49 @@ def set_job_state(
     state: str,
     exit_code: Optional[int] = None,
     reason: Optional[str] = None,
+    timestamps: Optional[Dict[str, float]] = None,
 ) -> None:
+    """
+    Update job status. The state's own timestamp (`state.lower()`) is always
+    recorded with the current wall clock. Pass `timestamps={...}` to also merge
+    extra keys (e.g. the SLURM poller passes a `running` timestamp derived from
+    sacct's Start field; without that we lose the start-time and run latencies
+    show as zero).
+    """
     if not job_id:
         raise ValueError("job_id is required")
     if state not in JobState._value2member_map_:  # type: ignore[attr-defined]
         raise ValueError(f"Invalid state: {state}")
 
     ts_key = state.lower()
-    ts_value = time.time()
+    extra_timestamps: Dict[str, float] = dict(timestamps) if timestamps else {}
+    # Prefer the caller's own timestamp for the new state if they provided
+    # one (e.g. the SLURM poller knows the actual Start time from sacct).
+    # Otherwise fall back to current wall clock.
+    if ts_key in extra_timestamps and extra_timestamps[ts_key] is not None:
+        ts_value = float(extra_timestamps[ts_key])
+    else:
+        ts_value = time.time()
 
     if _use_sqlite():
         with _sqlite_conn() as conn:
             row = conn.execute("SELECT timestamps FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
             if row is None:
                 raise KeyError(f"Job {job_id} not found")
-            timestamps = _json_load(row["timestamps"], {})
-            timestamps[ts_key] = ts_value
+            existing = _json_load(row["timestamps"], {})
+            for key, value in extra_timestamps.items():
+                # Fill in keys we don't already have a timestamp for. Never
+                # overwrite an existing recorded value.
+                if key not in existing and value is not None:
+                    existing[key] = float(value)
+            existing[ts_key] = ts_value
             cur = conn.execute(
                 """
                 UPDATE jobs
                 SET status=?, exit_code=?, reason=?, timestamps=?
                 WHERE job_id=?
                 """,
-                (state, exit_code, reason, json.dumps(timestamps), job_id),
+                (state, exit_code, reason, json.dumps(existing), job_id),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"Job {job_id} not found")
@@ -895,16 +915,21 @@ def set_job_state(
 
     with pg_conn() as conn:
         with _cursor(conn) as cur:
+            # JSONB `||` lets right-hand keys win on conflict. We want existing
+            # timestamps to win over `extras` (so we never clobber a recorded
+            # timestamp), but the state-keyed `now` to always win over both.
+            extras_json = json.dumps({k: float(v) for k, v in extra_timestamps.items() if v is not None})
+            state_keyed = json.dumps({ts_key: ts_value})
             cur.execute(
                 """
                 UPDATE jobs
                 SET status=%s,
                     exit_code=%s,
                     reason=%s,
-                    timestamps = coalesce(timestamps, '{}'::jsonb) || %s::jsonb
+                    timestamps = %s::jsonb || coalesce(timestamps, '{}'::jsonb) || %s::jsonb
                 WHERE job_id=%s
                 """,
-                (state, exit_code, reason, json.dumps({ts_key: ts_value}), job_id),
+                (state, exit_code, reason, extras_json, state_keyed, job_id),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"Job {job_id} not found")

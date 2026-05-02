@@ -53,15 +53,22 @@ class FakeCursor:
             return
 
         if normalized.startswith("UPDATE jobs SET status=%s, exit_code=%s, reason=%s, timestamps"):
-            state, exit_code, reason, ts_json, job_id = params
+            # New signature: (state, exit_code, reason, extras_json, state_keyed_json, job_id)
+            # The Postgres SQL is `extras::jsonb || existing || state_keyed::jsonb`
+            # so extras only fill in missing keys, existing keeps its values, and
+            # the state-keyed timestamp is always set last (winning on conflict).
+            state, exit_code, reason, extras_json, state_keyed_json, job_id = params
             existing = self.db.get(job_id)
             if existing is None:
                 self.rowcount = 0
                 return
 
             _old_state, node_id, gpu_ids, timestamps, _old_exit_code, _old_reason, project = existing
-            merged_timestamps = dict(timestamps or {})
-            merged_timestamps.update(json.loads(ts_json))
+            extras = json.loads(extras_json or "{}")
+            state_keyed = json.loads(state_keyed_json or "{}")
+            merged_timestamps = dict(extras)
+            merged_timestamps.update(timestamps or {})
+            merged_timestamps.update(state_keyed)
             self.db[job_id] = (state, node_id, gpu_ids, merged_timestamps, exit_code, reason, project)
             self.rowcount = 1
             return

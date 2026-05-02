@@ -345,6 +345,11 @@ class SlurmBackend(ExecutionBackend):
                             next_state,
                             exit_code=status.exit_code,
                             reason=status.reason,
+                            # Forward sacct-derived timestamps (e.g. `running`
+                            # built from Start) so the dashboard's run-latency
+                            # tiles have the start-time even when SLURM goes
+                            # PENDING -> COMPLETED faster than the poll interval.
+                            timestamps=status.timestamps,
                         )
             except Exception:
                 logger.exception("SLURM poller iteration failed")

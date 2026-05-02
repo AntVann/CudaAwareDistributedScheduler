@@ -65,13 +65,21 @@ Files: `control_plane/core/scheduler.py` (new `_build_no_placement_decision` + i
 
 ---
 
-### 6. Latency tiles read 0 despite completed jobs
+### 6. Latency tiles read 0 despite completed jobs — FIXED
 
-**Observed:** Dashboard shows `Run P50: 0`, `Run P95: 0` even with `test-003` and `live-test-1` having completed timestamps. Placement P50/P95 do show non-zero values.
+**Observed:** Dashboard showed `Run P50/P95: 0` even with `test-003` / `live-test-1` having completed. Placement P50/P95 worked, so it was clearly a data-availability issue rather than a calc bug.
 
-**Why it matters:** These tiles are part of the "scheduler observability" pitch. If they're empty, the dashboard looks broken.
+**Root cause:** The run-latency calc requires both a `running` and a terminal (`done`/`failed`/`cancelled`) timestamp on the job row. The SLURM poller's `_build_timestamps` *did* derive a `running` timestamp from sacct's `Start` field — but `set_job_state(...)` ignored it. It only ever wrote a single `state.lower()` keyed timestamp using `time.time()`. So when a job transitioned PLACED → RUNNING → DONE faster than the 10s poll interval (or was hydrated from SQLite at boot), the `running` key never made it into the `jobs.timestamps` JSON, and the calc skipped that row.
 
-**Where to look:** `/api/metrics/summary` handler. The run-latency calc is likely only counting jobs that transitioned in-process during the current uptime, ignoring rows hydrated from SQLite at boot. Also confirm the timestamps schema actually contains `started`/`finished` for SLURM-completed jobs.
+**Fix:**
+
+- `set_job_state(job_id, state, ..., timestamps=None)` now accepts an optional caller-supplied timestamps dict. The Postgres path uses `extras::jsonb || existing || state_keyed::jsonb` so extras only fill in missing keys, existing values always win on conflict, and the new state's key always lands last with whichever value the caller provided (or `time.time()` if none). The SQLite path mirrors that semantically. Net effect: `running` derived from sacct survives, even when the poller leaps over the RUNNING state in a single tick.
+- SLURM poller (`_poller_loop`) now forwards `status.timestamps` through to `set_job_state`.
+- New unit tests cover both branches: a fast PLACED→DONE jump preserves `running`, and a separate explicit RUNNING transition is not later overwritten by a stale extras value.
+
+Files: `control_plane/core/persistence.py`, `control_plane/core/backends/slurm.py`, `tests/unit/test_persistence.py` (fake-cursor signature), `tests/unit/test_persistence_sqlite.py` (two new test cases).
+
+**Note for live verification:** historical jobs that completed *before* this fix will still have no `running` timestamp on disk and will continue to be excluded from run-latency. The tile will populate as soon as new jobs run end-to-end.
 
 ---
 
