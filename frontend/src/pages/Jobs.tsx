@@ -151,7 +151,9 @@ export default function Jobs() {
   const [jobs, setJobs] = useState<JobListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  // Default ON: this is a live ops dashboard, stale rows are misleading.
+  // Polling tick is 3s in the effect below; users can toggle off with the checkbox.
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // Submit form state

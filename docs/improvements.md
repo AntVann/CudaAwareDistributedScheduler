@@ -144,13 +144,15 @@ Files: `frontend/src/pages/Dashboard.tsx`.
 
 ---
 
-### 11. Auto-refresh is opt-in and off by default
+### 11. Auto-refresh is opt-in and off by default — FIXED
 
-**Observed:** Checkbox at top of Jobs page, unchecked initially. Dashboard probably also static.
+**Observed:** Checkbox at top of Jobs page started unchecked, so rows looked frozen until the user thought to click it.
 
-**Why it matters:** This is a live ops dashboard. The default should be live.
+**Fix:** `Jobs.tsx` — flipped `useState(false)` to `useState(true)` for `autoRefresh`. Polling tick is the existing 3s. The Dashboard was already auto-refreshing on a 5s interval, so no change needed there. Users can still toggle off with the existing checkbox.
 
-**Where to look:** `Jobs.tsx` and `Dashboard.tsx` — flip default state, polling at 3–5s. Optionally: switch to SSE / websockets so we don't poll.
+SSE/websocket migration deferred — not worth it for the current scale, and would also need backend work.
+
+Files: `frontend/src/pages/Jobs.tsx`.
 
 ---
 
