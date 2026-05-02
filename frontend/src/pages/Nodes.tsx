@@ -107,8 +107,15 @@ export default function Nodes() {
   }, [token]);
 
   return (
-    <div className="max-w-5xl space-y-5">
-      <h2 className="text-lg font-semibold">Nodes</h2>
+    <div className="page fade-in">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Nodes</h1>
+          <div className="page-sub">
+            {nodes.length === 0 ? "No nodes registered yet." : `${nodes.length} node${nodes.length === 1 ? "" : "s"} reporting`}
+          </div>
+        </div>
+      </div>
 
       {error && (
         <div className="rounded-md border border-state-failed/30 bg-state-failed/10 px-4 py-3 text-sm text-state-failed">
