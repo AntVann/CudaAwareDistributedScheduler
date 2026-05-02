@@ -134,13 +134,21 @@ Files: `frontend/src/pages/Dashboard.tsx`.
 
 ---
 
-### 10. Jobs table has no filtering, search, or sort
+### 10. Jobs table has no filtering, search, or sort — FIXED
 
-**Observed:** Plain table, ordered by some implicit default. No state filter, no job-id search.
+**Observed:** Plain table with no state filter, no job-id search, fixed sort. Hundreds of rows from past runs would have made the table unusable.
 
-**Why it matters:** Once the SQLite DB has hundreds of rows from past runs, the table is unusable.
+**Fix:** Client-side filter / search / sort bar above the table:
 
-**Where to look:** `frontend/src/pages/Jobs.tsx`. Add: state multi-select, job-id substring filter, time-range filter, click-to-sort headers. Either client-side (cheap, fine up to ~1k rows) or push down to `/api/jobs?state=...&limit=...` query params.
+- State multi-select chips for QUEUED/PLACED/RUNNING/DONE/FAILED/CANCELLED with "all"/"none" shortcuts. Defaults to all-on.
+- Job ID substring search.
+- Sort toggle: "Enqueued ↓ newest" / "↑ oldest". Defaults to newest.
+- Footer "Showing N of M (filtered)" so filter activity is visible.
+- "No jobs match the current filter (M total)" empty-state when filters exclude everything.
+
+Pure React state, no API changes. Time-range filter rolled into #12.
+
+Files: `frontend/src/pages/Jobs.tsx`.
 
 ---
 
@@ -158,23 +166,29 @@ Files: `frontend/src/pages/Jobs.tsx`.
 
 ## Operational / scope
 
-### 12. No retention or "last N hours" filter
+### 12. No retention or "last N hours" filter — FIXED (UI only)
 
-**Observed:** Dashboard counters and Jobs table accumulate forever from SQLite. Old demo runs pollute the live view.
+**Observed:** Jobs table accumulated forever; old demo runs polluted the live view.
 
-**Why it matters:** Can't tell what just happened vs. what happened a week ago. Eventually impacts performance too.
+**Fix:** Added a "Window" chip group to the Jobs filter bar — `1h / 24h / 7d / all` — that filters by the `enqueued` timestamp client-side. Default is `24h` to match typical "what happened today" usage without losing access to older rows. Combines with the state filter and search.
 
-**Where to look:** Add a time-window param to `/api/jobs` and `/api/metrics/summary`. Optionally a soft archive flag on old rows.
+Backend retention (e.g. an archive flag, query param on `/api/jobs?since=...`) deferred — current scale doesn't justify it and the client-side filter solves the operator-visibility problem completely.
+
+Files: `frontend/src/pages/Jobs.tsx`.
 
 ---
 
-### 13. Submit form exposes only `cmd` / `gpus` / `partition`
+### 13. Submit form exposes only `cmd` / `gpus` / `partition` — FIXED
 
-**Observed:** The `JobSpec` model defines `cpu`, `mem_gb`, `priority`, `env`. None of those are in the Submit Test Job form.
+**Observed:** The `JobSpec` model defined `cpu`, `mem_gb`, `priority`, `env` but the form didn't expose any of them, forcing curl for non-trivial jobs.
 
-**Why it matters:** Forces users to drop to curl for any non-trivial job. We support more than we expose.
+**Fix:** Added a collapsible "Advanced (CPU / Memory / Priority / Env)" section to the submit panel. CPU/memory/priority are number inputs with `default` placeholders so empty stays unset and the backend keeps its defaults. Env is a textarea — one `KEY=value` per line, `#` for comments — parsed into `Record<string,string>` on submit. Renamed the button and panel from "Submit Test Job" / "Submit a Test Job" to "Submit Job" / "Submit a Job" since the form is now real.
 
-**Where to look:** `frontend/src/pages/Jobs.tsx` submit panel. Add the missing fields. Probably also rename the button — "Submit Test Job" undersells it.
+`JobSpec` interface in `client.ts` updated to match the Pydantic model (`cpu?`, `mem_gb?`, `priority?` added).
+
+**Backend wiring:** SLURM batch script generator already mapped `spec.cpu` → `#SBATCH --cpus-per-task`, `spec.mem_gb` → `#SBATCH --mem`, and `spec.env` → `export VAR=value` lines. `priority` flows into the JobSpec but is not yet used by the scheduler for queue ordering (FIFO/RR/BINPACK ignore it) — that's a future scheduler change, out of scope for this issue.
+
+Files: `frontend/src/api/client.ts`, `frontend/src/pages/Jobs.tsx`.
 
 ---
 

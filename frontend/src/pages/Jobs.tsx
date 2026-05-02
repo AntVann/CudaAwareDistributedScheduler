@@ -156,12 +156,46 @@ export default function Jobs() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // Filter / search / sort state. State multi-select defaults to all-on, search
+  // is a substring match on job_id, sort toggles enqueued newest/oldest.
+  const ALL_STATES = ["QUEUED", "PLACED", "RUNNING", "DONE", "FAILED", "CANCELLED"];
+  const [stateFilter, setStateFilter] = useState<Set<string>>(new Set(ALL_STATES));
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortDir, setSortDir] = useState<"newest" | "oldest">("newest");
+  // Time window in hours; null = all time. Default 24h matches typical "what
+  // happened today" workflow without losing access to older rows.
+  const TIME_WINDOWS: { value: number | null; label: string }[] = [
+    { value: 1, label: "1h" },
+    { value: 24, label: "24h" },
+    { value: 24 * 7, label: "7d" },
+    { value: null, label: "all" },
+  ];
+  const [windowHours, setWindowHours] = useState<number | null>(24);
+
+  const toggleStateFilter = (state: string) => {
+    setStateFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(state)) {
+        next.delete(state);
+      } else {
+        next.add(state);
+      }
+      return next;
+    });
+  };
+
   // Submit form state
   const [showSubmit, setShowSubmit] = useState(false);
   const [project, setProject] = useState("");
   const [cmd, setCmd] = useState('["echo", "hello"]');
   const [gpus, setGpus] = useState(1);
   const [partition, setPartition] = useState("");
+  // Optional advanced fields (#13). Empty string = leave the JobSpec field
+  // unset so the backend keeps its defaults.
+  const [cpuStr, setCpuStr] = useState("");
+  const [memGbStr, setMemGbStr] = useState("");
+  const [priorityStr, setPriorityStr] = useState("");
+  const [envText, setEnvText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState<{ msg: string; ok: boolean } | null>(null);
 
@@ -243,14 +277,40 @@ export default function Jobs() {
       if (partition) {
         metadata.partition = partition;
       }
-      const res: EnqueueResponse = await submitJob({
+
+      // Parse optional advanced fields. Empty / whitespace = leave undefined.
+      const cpu = cpuStr.trim() ? parseInt(cpuStr, 10) : undefined;
+      const memGb = memGbStr.trim() ? parseFloat(memGbStr) : undefined;
+      const priority = priorityStr.trim() ? parseInt(priorityStr, 10) : undefined;
+      const env: Record<string, string> = {};
+      for (const rawLine of envText.split("\n")) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith("#")) continue;
+        const eq = line.indexOf("=");
+        if (eq <= 0) {
+          throw new Error(
+            `Env line not in KEY=VALUE form: ${line}. Use one VAR=value per line, # for comments.`,
+          );
+        }
+        const key = line.slice(0, eq).trim();
+        const value = line.slice(eq + 1);
+        env[key] = value;
+      }
+
+      const spec: import("../api/client").JobSpec = {
         job_id: jobId,
         project: project.trim(),
         image: "",
         cmd: parsedCmd,
         gpus,
         metadata,
-      }, token);
+      };
+      if (cpu !== undefined && !Number.isNaN(cpu)) spec.cpu = cpu;
+      if (memGb !== undefined && !Number.isNaN(memGb)) spec.mem_gb = memGb;
+      if (priority !== undefined && !Number.isNaN(priority)) spec.priority = priority;
+      if (Object.keys(env).length > 0) spec.env = env;
+
+      const res: EnqueueResponse = await submitJob(spec, token);
       setSubmitResult({
         msg: res.created
           ? `Created job ${res.job_id} (201)`
@@ -286,7 +346,7 @@ export default function Jobs() {
             onClick={() => setShowSubmit(!showSubmit)}
             className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
           >
-            Submit Test Job
+            Submit Job
           </button>
         </div>
       </div>
@@ -294,9 +354,10 @@ export default function Jobs() {
       {/* Submit panel */}
       {showSubmit && (
         <Card>
-          <h3 className="text-sm font-medium text-text-secondary mb-3">Submit a Test Job</h3>
+          <h3 className="text-sm font-medium text-text-secondary mb-3">Submit a Job</h3>
           <p className="mb-3 text-xs text-text-muted">
-            This action requires a valid user/admin token stored in the sidebar.
+            Requires a valid user/admin token in the sidebar. Advanced fields (CPU,
+            memory, priority, env) are optional — leave blank to use backend defaults.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
             <div>
@@ -364,6 +425,60 @@ export default function Jobs() {
               </div>
             </div>
           </div>
+
+          {/* Advanced fields — match the JobSpec model 1:1 */}
+          <details className="mb-3 rounded-md border border-border bg-surface-0 px-3 py-2">
+            <summary className="cursor-pointer text-xs font-medium text-text-secondary">
+              Advanced (CPU / Memory / Priority / Env)
+            </summary>
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs text-text-muted mb-1">CPUs</label>
+                <input
+                  type="number"
+                  min={1}
+                  placeholder="default"
+                  value={cpuStr}
+                  onChange={(e) => setCpuStr(e.target.value)}
+                  className="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted mb-1">Memory (GB)</label>
+                <input
+                  type="number"
+                  min={0}
+                  step="0.5"
+                  placeholder="default"
+                  value={memGbStr}
+                  onChange={(e) => setMemGbStr(e.target.value)}
+                  className="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted mb-1">Priority</label>
+                <input
+                  type="number"
+                  placeholder="0"
+                  value={priorityStr}
+                  onChange={(e) => setPriorityStr(e.target.value)}
+                  className="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent"
+                />
+              </div>
+            </div>
+            <div className="mt-3">
+              <label className="block text-xs text-text-muted mb-1">
+                Env (one VAR=value per line, # for comments)
+              </label>
+              <textarea
+                value={envText}
+                onChange={(e) => setEnvText(e.target.value)}
+                rows={4}
+                placeholder={"# example\nCUDA_VISIBLE_DEVICES=0,1\nMY_FLAG=1"}
+                className="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+              />
+            </div>
+          </details>
           <div className="flex items-center gap-3">
             <button
               onClick={handleSubmit}
@@ -387,30 +502,147 @@ export default function Jobs() {
         </div>
       )}
 
-      {/* Jobs table */}
-      {loading ? (
-        <p className="text-sm text-text-muted">Loading...</p>
-      ) : jobs.length === 0 ? (
+      {/* Filter / search / sort bar — only shown when there are jobs to filter */}
+      {!loading && jobs.length > 0 && (
         <Card>
-          <p className="text-sm text-text-muted text-center py-4">No jobs found. Submit a test job to get started.</p>
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="text-text-muted mr-1">State:</span>
+              {ALL_STATES.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => toggleStateFilter(s)}
+                  className={`rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+                    stateFilter.has(s)
+                      ? "border-accent bg-accent/10 text-accent"
+                      : "border-border bg-surface-0 text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  {s}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setStateFilter(new Set(ALL_STATES))}
+                className="ml-1 text-[11px] text-text-muted hover:text-text-secondary underline-offset-2 hover:underline"
+              >
+                all
+              </button>
+              <button
+                type="button"
+                onClick={() => setStateFilter(new Set())}
+                className="text-[11px] text-text-muted hover:text-text-secondary underline-offset-2 hover:underline"
+              >
+                none
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-text-muted">Search:</span>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="job_id substring"
+                className="rounded-md border border-border bg-surface-0 px-2 py-1 text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="text-text-muted mr-1">Window:</span>
+              {TIME_WINDOWS.map((w) => (
+                <button
+                  key={w.label}
+                  type="button"
+                  onClick={() => setWindowHours(w.value)}
+                  className={`rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+                    windowHours === w.value
+                      ? "border-accent bg-accent/10 text-accent"
+                      : "border-border bg-surface-0 text-text-muted hover:text-text-secondary"
+                  }`}
+                  title={
+                    w.value === null
+                      ? "Show all jobs regardless of age"
+                      : `Show jobs enqueued in the last ${w.label}`
+                  }
+                >
+                  {w.label}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => setSortDir((d) => (d === "newest" ? "oldest" : "newest"))}
+              className="rounded-md border border-border bg-surface-0 px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary"
+              title="Toggle sort direction"
+            >
+              Enqueued {sortDir === "newest" ? "↓ newest" : "↑ oldest"}
+            </button>
+          </div>
         </Card>
-      ) : (
-        <div className="overflow-x-auto rounded-lg border border-border">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border bg-surface-1 text-left text-xs text-text-muted">
-                <th className="px-4 py-2.5 font-medium">Job ID</th>
-                <th className="px-4 py-2.5 font-medium">SLURM ID</th>
-                <th className="px-4 py-2.5 font-medium">State</th>
-                <th className="px-4 py-2.5 font-medium">Project</th>
-                <th className="px-4 py-2.5 font-medium">Node</th>
-                <th className="px-4 py-2.5 font-medium">Exit Code</th>
-                <th className="px-4 py-2.5 font-medium">Reason</th>
-                <th className="px-4 py-2.5 font-medium">Enqueued</th>
-              </tr>
-            </thead>
-            <tbody>
-              {jobs.map((job) => (
+      )}
+
+      {/* Jobs table */}
+      {(() => {
+        const q = searchQuery.trim().toLowerCase();
+        const cutoffSecs =
+          windowHours === null ? null : Date.now() / 1000 - windowHours * 3600;
+        const filtered = jobs
+          .filter((j) => stateFilter.has(j.state))
+          .filter((j) => !q || j.job_id.toLowerCase().includes(q))
+          .filter((j) => {
+            if (cutoffSecs === null) return true;
+            const enq = j.timestamps?.enqueued ?? 0;
+            return enq >= cutoffSecs;
+          });
+        const sorted = [...filtered].sort((a, b) => {
+          const ta = a.timestamps?.enqueued ?? 0;
+          const tb = b.timestamps?.enqueued ?? 0;
+          return sortDir === "newest" ? (tb || 0) - (ta || 0) : (ta || 0) - (tb || 0);
+        });
+
+        if (loading) {
+          return <p className="text-sm text-text-muted">Loading...</p>;
+        }
+        if (jobs.length === 0) {
+          return (
+            <Card>
+              <p className="text-sm text-text-muted text-center py-4">
+                No jobs found. Submit a test job to get started.
+              </p>
+            </Card>
+          );
+        }
+        if (sorted.length === 0) {
+          return (
+            <Card>
+              <p className="text-sm text-text-muted text-center py-4">
+                No jobs match the current filter ({jobs.length} total). Try adjusting state or search.
+              </p>
+            </Card>
+          );
+        }
+        return (
+          <div className="space-y-2">
+            <p className="text-xs text-text-muted">
+              Showing {sorted.length} of {jobs.length}
+              {sorted.length !== jobs.length ? " (filtered)" : ""}.
+            </p>
+            <div className="overflow-x-auto rounded-lg border border-border">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border bg-surface-1 text-left text-xs text-text-muted">
+                    <th className="px-4 py-2.5 font-medium">Job ID</th>
+                    <th className="px-4 py-2.5 font-medium">SLURM ID</th>
+                    <th className="px-4 py-2.5 font-medium">State</th>
+                    <th className="px-4 py-2.5 font-medium">Project</th>
+                    <th className="px-4 py-2.5 font-medium">Node</th>
+                    <th className="px-4 py-2.5 font-medium">Exit Code</th>
+                    <th className="px-4 py-2.5 font-medium">Reason</th>
+                    <th className="px-4 py-2.5 font-medium">Enqueued</th>
+                  </tr>
+                </thead>
+                <tbody>
+              {sorted.map((job) => (
                 <Fragment key={job.job_id}>
                   <tr
                     onClick={() => setExpandedId(expandedId === job.job_id ? null : job.job_id)}
@@ -595,7 +827,9 @@ export default function Jobs() {
             </tbody>
           </table>
         </div>
-      )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

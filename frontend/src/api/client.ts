@@ -120,6 +120,9 @@ export interface JobSpec {
   image: string;
   cmd: string[];
   gpus?: number;
+  cpu?: number;
+  mem_gb?: number;
+  priority?: number;
   env?: Record<string, string>;
   metadata?: Record<string, unknown>;
 }
