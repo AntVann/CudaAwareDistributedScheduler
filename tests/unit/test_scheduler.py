@@ -98,6 +98,59 @@ def test_tick_persists_no_placement_decision_when_no_eligible_nodes(monkeypatch)
         assert "not enough GPUs" in cand["rejected_reason"]
 
 
+def test_tick_requeues_when_get_job_status_raises(monkeypatch):
+    """Regression: if the DB is transiently unavailable, get_job_status() can
+    raise. The scheduler must rpush the popped job back onto the queue rather
+    than silently dropping it."""
+    fake_redis = FakeRedis()
+    submit_calls = []
+
+    class NotCalledBackend:
+        def submit(self, spec, node_hint=None):
+            submit_calls.append((spec.job_id, node_hint))
+            raise AssertionError("backend.submit must not run when status read fails")
+
+    scheduler = SchedulerStub(nodes=[NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0)])
+    scheduler.backend = NotCalledBackend()
+
+    def boom(job_id):
+        raise RuntimeError("transient db error")
+
+    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", boom)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_job_spec",
+        lambda job_id: JobSpec(job_id=job_id, project="default", image="", cmd=["echo"], gpus=1),
+    )
+    monkeypatch.setattr(scheduler_module, "place_job", lambda *a, **k: None)
+    monkeypatch.setattr(scheduler_module, "set_job_state", lambda *a, **k: None)
+
+    scheduler.tick()  # MUST NOT raise; tick is wrapped by the loop in app.py.
+
+    # Job is back on the queue, no dispatch happened.
+    assert submit_calls == []
+    assert fake_redis.right_pushes == [("jobs:queue", "job-1")]
+
+
+def test_tick_requeues_when_get_job_spec_raises(monkeypatch):
+    """Same protection but for the get_job_spec call."""
+    fake_redis = FakeRedis()
+
+    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
+
+    def boom(job_id):
+        raise RuntimeError("transient db error")
+
+    monkeypatch.setattr(scheduler_module, "get_job_spec", boom)
+    monkeypatch.setattr(scheduler_module, "place_job", lambda *a, **k: None)
+
+    SchedulerStub(nodes=[NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0)]).tick()
+
+    assert fake_redis.right_pushes == [("jobs:queue", "job-1")]
+
+
 def test_tick_skips_jobs_already_cancelled_before_dispatch(monkeypatch):
     """If a job was cancelled while sitting in the queue, the scheduler must
     not dispatch it to the backend on its next tick."""

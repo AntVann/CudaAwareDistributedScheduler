@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
@@ -109,22 +109,35 @@ def cancel_job(
             detail=f"Job is in terminal state {status.state.value}; cannot cancel",
         )
 
-    scheduler = getattr(request.app.state, "scheduler", None)
-    backend = getattr(scheduler, "backend", None)
-    backend_accepted: Optional[bool] = None
-    if status.state in {JobState.PLACED, JobState.RUNNING} and backend is not None:
+    # QUEUED jobs have not been dispatched to the backend yet (no backend_ref),
+    # so we can mark them CANCELLED unconditionally — the scheduler tick will
+    # drop them when it pops them off the queue. PLACED/RUNNING jobs MUST get
+    # confirmation from the backend before we mutate state, otherwise the
+    # dashboard would lie about a still-running job.
+    if status.state in {JobState.PLACED, JobState.RUNNING}:
+        scheduler = getattr(request.app.state, "scheduler", None)
+        backend = getattr(scheduler, "backend", None)
+        if backend is None:
+            raise HTTPException(
+                status_code=502,
+                detail="No execution backend is available to cancel a dispatched job; state unchanged",
+            )
         try:
-            backend_accepted = bool(backend.cancel(job_id))
+            accepted = bool(backend.cancel(job_id))
         except Exception:
             logger.exception("Backend cancel raised for job %s", job_id)
-            backend_accepted = False
-
-    reason = "cancelled by operator"
-    if backend_accepted is False:
-        reason = "cancelled by operator (backend rejected scancel)"
+            raise HTTPException(
+                status_code=502,
+                detail="Backend raised while cancelling job; state unchanged. Try again or check the cluster.",
+            ) from None
+        if not accepted:
+            raise HTTPException(
+                status_code=502,
+                detail="Backend rejected the cancel (job may have already finished or scancel failed); state unchanged",
+            )
 
     try:
-        set_job_state(job_id, JobState.CANCELLED.value, reason=reason)
+        set_job_state(job_id, JobState.CANCELLED.value, reason="cancelled by operator")
     except KeyError:
         raise HTTPException(status_code=404, detail="Job not found") from None
     except Exception as exc:

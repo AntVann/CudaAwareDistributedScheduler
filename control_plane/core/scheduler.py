@@ -68,35 +68,51 @@ class NaiveScheduler:
         if not job_id:
             return
 
-        # Drop jobs that left the QUEUED state while waiting in line — most
-        # commonly because the operator cancelled them via /api/jobs/{id}/cancel.
-        # Without this guard, cancelled jobs would still be dispatched to SLURM.
-        current_status = get_job_status(job_id)
-        if current_status is not None and current_status.state.value != "QUEUED":
-            logger.info(
-                "Skipping job %s: state is %s (cancelled or otherwise terminal)",
-                job_id,
-                current_status.state.value,
-            )
-            return
+        # Everything between the destructive lpop above and a successful dispatch
+        # below is wrapped: if any pre-dispatch step raises (transient DB blip in
+        # get_job_status / get_job_spec / placement persistence, scheduler bug,
+        # whatever), we MUST push the job back onto the queue. Otherwise the
+        # job is silently lost. After dispatch succeeds the dispatch-failure
+        # path takes over and marks FAILED; before dispatch we treat exceptions
+        # as transient and let the next tick retry.
+        try:
+            # Drop jobs that left the QUEUED state while waiting in line — most
+            # commonly because the operator cancelled them via /api/jobs/{id}/cancel.
+            current_status = get_job_status(job_id)
+            if current_status is not None and current_status.state.value != "QUEUED":
+                logger.info(
+                    "Skipping job %s: state is %s (cancelled or otherwise terminal)",
+                    job_id,
+                    current_status.state.value,
+                )
+                return
 
-        spec = get_job_spec(job_id) or JobSpec(job_id=job_id, project="default", image="", cmd=[])
-        nodes = self._recent_nodes(self.recent_secs)
-        eligible_nodes = self._eligible_nodes(spec, nodes)
-        if not eligible_nodes:
-            r.rpush(_QUEUE_KEY, job_id)
-            # Persist the structured "why not placed" decision so the UI can
-            # surface it in the job's row expansion. Without this, the job
-            # just sits in QUEUED with no operator-visible reason.
+            spec = get_job_spec(job_id) or JobSpec(job_id=job_id, project="default", image="", cmd=[])
+            nodes = self._recent_nodes(self.recent_secs)
+            eligible_nodes = self._eligible_nodes(spec, nodes)
+            if not eligible_nodes:
+                r.rpush(_QUEUE_KEY, job_id)
+                # Persist the structured "why not placed" decision so the UI can
+                # surface it in the job's row expansion. Failure here is non-fatal
+                # — the job is already safely back on the queue.
+                try:
+                    no_placement = self._build_no_placement_decision(spec, nodes)
+                    set_placement_decision(job_id, no_placement)
+                except Exception:
+                    logger.exception("Failed to persist no-placement decision for job %s", job_id)
+                logger.info("No eligible nodes for job %s under policy %s", job_id, self.active_policy.value)
+                return
+
+            node_id, decision = self._select_node(r, spec, eligible_nodes, nodes)
+        except Exception:
+            logger.exception("Pre-dispatch error for job %s; requeuing", job_id)
             try:
-                no_placement = self._build_no_placement_decision(spec, nodes)
-                set_placement_decision(job_id, no_placement)
+                r.rpush(_QUEUE_KEY, job_id)
             except Exception:
-                logger.exception("Failed to persist no-placement decision for job %s", job_id)
-            logger.info("No eligible nodes for job %s under policy %s", job_id, self.active_policy.value)
+                # If even the requeue fails (Redis flap), the job IS lost — log
+                # loudly so operators have a chance to resubmit.
+                logger.exception("CRITICAL: failed to requeue job %s after pre-dispatch error", job_id)
             return
-
-        node_id, decision = self._select_node(r, spec, eligible_nodes, nodes)
 
         # Dispatch via backend if available, otherwise fall back to direct Redis push
         dispatched = False

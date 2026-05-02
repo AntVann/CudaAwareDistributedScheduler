@@ -211,6 +211,31 @@ Stretch goal still open: a "policy comparison" page that replays a queue under F
 
 ---
 
+## Follow-up fixes from review
+
+### F1. Lost jobs when status read fails — FIXED
+
+**Observed:** `tick()` destructively pops a job before calling `get_job_status()`. If persistence is transiently unavailable, the exception escapes to the scheduler loop's logger and the popped `job_id` is never pushed back. Job permanently lost.
+
+**Fix:** Wrapped the entire pre-dispatch path (status read + spec read + node listing + eligibility filter + node selection) in a single try/except. On any exception before successful dispatch, the job is `rpush`ed back to `jobs:queue` and the next tick retries. Two new unit tests cover `get_job_status` raising and `get_job_spec` raising.
+
+The existing dispatch-failure path is unchanged: once we've called `backend.submit()` we still mark FAILED, since at that point the failure is more likely to be a job-config problem than a transient blip.
+
+Files: `control_plane/core/scheduler.py`, `tests/unit/test_scheduler.py`.
+
+### F2. Cancel mutates state when backend rejects — FIXED
+
+**Observed:** For PLACED/RUNNING jobs, `POST /api/jobs/{id}/cancel` recorded CANCELLED even when `backend.cancel()` returned False or raised. With the redis-agent backend that always returns False; with SLURM `scancel` can fail (job already finished, permissions). Either way the dashboard could show terminal CANCELLED for a still-running worker.
+
+**Fix:** Split the path:
+
+- `QUEUED` jobs: no backend dispatch yet, mark CANCELLED unconditionally (the scheduler's tick guard drops them on the next pop).
+- `PLACED`/`RUNNING` jobs: only mark CANCELLED if `backend.cancel()` returns True. If it returns False or raises, the API returns `502` with a descriptive detail and leaves state untouched. Operator can retry or investigate.
+
+Four new unit tests in `tests/unit/test_jobs_api.py` cover: QUEUED bypass-backend, RUNNING + backend rejects (502), RUNNING + backend raises (502), RUNNING + backend accepts (CANCELLED).
+
+Files: `control_plane/api/jobs.py`, `tests/unit/test_jobs_api.py`.
+
 ## Suggested order
 
 1. **#1 (Nodes empty)** — foundation; everything else assumes it works.
