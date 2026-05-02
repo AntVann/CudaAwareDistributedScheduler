@@ -43,6 +43,11 @@ class SlurmBackend(ExecutionBackend):
         self._stop_event = threading.Event()
         self._poller_thread: Optional[threading.Thread] = None
 
+        # Cache of which `sinfo --Format=...` field sets this cluster supports.
+        # On older SLURM (no GresUsed), we'd otherwise re-probe and log a
+        # WARNING every scheduler tick (~1 Hz). Cleared on backend restart.
+        self._sinfo_format_supported: Dict[str, bool] = {}
+
     def submit(self, spec: JobSpec, node_hint: Optional[str] = None) -> str:
         script = self._generate_batch_script(spec, node_hint)
         script_path = self._write_temp_script(spec.job_id, script)
@@ -165,9 +170,18 @@ class SlurmBackend(ExecutionBackend):
         # Prefer the 5-column form (with GresUsed) on modern SLURM. Fall back
         # to the 4-column form when GresUsed is rejected as an unknown field
         # (e.g. SLURM < 20.11 on coe-hpc1: "Invalid job format specification: GresUsed").
-        rows = self._run_sinfo_text("NodeList,Partition,StateLong,Gres,GresUsed")
+        # Skip the 5-col probe entirely once we've learned this cluster rejects it.
+        rows: Optional[List[List[str]]] = None
+        five_col_format = "NodeList,Partition,StateLong,Gres,GresUsed"
+        four_col_format = "NodeList,Partition,StateLong,Gres"
+        if self._sinfo_format_supported.get(five_col_format) is not False:
+            rows = self._run_sinfo_text(five_col_format)
+            if rows is None:
+                self._sinfo_format_supported[five_col_format] = False
+            else:
+                self._sinfo_format_supported[five_col_format] = True
         if rows is None:
-            rows = self._run_sinfo_text("NodeList,Partition,StateLong,Gres")
+            rows = self._run_sinfo_text(four_col_format)
         if rows is None:
             return []
 
