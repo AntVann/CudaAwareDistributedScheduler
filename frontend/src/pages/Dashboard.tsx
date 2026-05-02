@@ -260,7 +260,13 @@ export default function Dashboard() {
                 Active: <span className="font-mono text-text-primary">{policies?.active ?? "-"}</span>
               </p>
             </div>
-            <span className="text-xs text-text-muted">{token ? "API token set" : "Read-only mode"}</span>
+            <span
+              className={`text-xs ${
+                token ? "text-text-muted" : "text-state-queued"
+              }`}
+            >
+              {token ? "API token set" : "Read-only — admin token required to change policy"}
+            </span>
           </div>
           <div className="flex flex-wrap gap-2">
             {policies?.supported.map((policy) => (
@@ -268,7 +274,19 @@ export default function Dashboard() {
                 key={policy}
                 type="button"
                 onClick={() => handlePolicyChange(policy)}
-                disabled={updatingPolicy || !policies || policies.active === policy}
+                disabled={
+                  updatingPolicy ||
+                  !policies ||
+                  policies.active === policy ||
+                  !token
+                }
+                title={
+                  !token
+                    ? "Read-only mode: enter an admin token in the sidebar to switch policies"
+                    : policies?.active === policy
+                      ? "Already the active policy"
+                      : undefined
+                }
                 className={`rounded-md border px-3 py-2 text-xs font-medium transition-colors ${
                   policies?.active === policy
                     ? "border-accent bg-accent/10 text-accent"

@@ -118,13 +118,19 @@ Stretch goal still open: SSE-based live tailing instead of pull-on-click + manua
 
 ---
 
-### 9. Policy buttons appear active in read-only mode
+### 9. Policy buttons appear active in read-only mode — FIXED
 
-**Observed:** Sidebar says "Read-only mode" when no operator token is set, but the FIFO / ROUND_ROBIN / BINPACK buttons on the Dashboard look fully clickable. Clicking them silently fails.
+**Observed:** Sidebar said "Read-only mode" with no token, but the FIFO/ROUND_ROBIN/BINPACK buttons on the Dashboard looked fully clickable; clicking them silently failed.
 
-**Why it matters:** Confusing — looks like the policy switch is broken when really the user just hasn't authenticated.
+**Fix:**
 
-**Where to look:** `Dashboard.tsx` policy panel. Disable buttons (visually grayed out + `disabled` attribute) when `!token`. The card already has a "Read-only mode" label on the right; tie that to actual button state.
+- Added `!token` to the policy buttons' `disabled` predicate so they go visually grayed-out the moment auth drops.
+- Added `title=` tooltips that explain the disabled reason ("Read-only mode: enter an admin token in the sidebar to switch policies" vs. "Already the active policy").
+- Replaced the muted "Read-only mode" label with a more visible warning-color line: "Read-only — admin token required to change policy". When a token *is* set the label stays as before ("API token set" in muted text).
+
+In practice, the post-auth-merge code already gates `fetchPolicies` on a token, so in pure read-only mode the buttons don't render at all. This change covers the edge case of a stale `policies` object after a token is cleared mid-session, and makes the read-only state much more legible.
+
+Files: `frontend/src/pages/Dashboard.tsx`.
 
 ---
 
