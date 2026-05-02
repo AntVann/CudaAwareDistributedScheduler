@@ -45,13 +45,15 @@ Files: `frontend/src/pages/Dashboard.tsx`.
 
 ---
 
-### 4. Failed placement leaves jobs in `QUEUED` with no reason
+### 4. Failed placement leaves jobs in `QUEUED` with no reason — FIXED
 
-**Observed:** `test-001` shows `QUEUED`, no SLURM ID, no node, `Reason: -`. There is no way to tell from the UI why placement didn't happen.
+**Observed:** `test-001` showed `QUEUED`, no SLURM ID, no node, `Reason: -`. There was no way to tell from the UI why placement didn't happen.
 
-**Why it matters:** "Stuck in queue" is the most common debugging scenario for an HPC user. Surfacing a reason ("no nodes match GPU request", "partition unreachable", etc.) avoids hours of sshing around.
+**Fix:** Reused the `placement_decision` blob shape introduced for #14. When `tick()` finds no eligible nodes, it now builds a "no placement" decision (`chosen_node_id: null`, every candidate marked rejected with its specific reason — `state=drained`, `partition mismatch (need X, have Y)`, `not enough GPUs (N available, M requested)`, etc.) and persists it via a new `set_placement_decision(job_id, decision)` helper that updates only the `placement_decision` column without touching state/timestamps.
 
-**Where to look:** Scheduler placement loop in `control_plane/core/scheduler.py` (or wherever the QUEUED→PLACED transition is decided). On a no-op cycle, persist a structured reason on the job row.
+The existing Placement decision panel in the Jobs row expansion now renders the no-placement case with a "STUCK · no eligible nodes" badge next to the panel title; the candidate table shows every node and the precise reason it was rejected. Each tick refreshes the blob, so operators always see the latest blocker.
+
+Files: `control_plane/core/scheduler.py` (new `_build_no_placement_decision` + integration in `tick()`), `control_plane/core/persistence.py` (new `set_placement_decision`), `frontend/src/api/client.ts` (`chosen_node_id` is now nullable), `frontend/src/pages/Jobs.tsx` (STUCK badge), `tests/unit/test_scheduler.py` (new `test_tick_persists_no_placement_decision_when_no_eligible_nodes`).
 
 ---
 

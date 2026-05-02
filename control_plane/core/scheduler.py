@@ -13,6 +13,7 @@ from control_plane.core.persistence import (
     place_job,
     redis_client,
     set_job_state,
+    set_placement_decision,
 )
 
 logger = logging.getLogger("control_plane.scheduler")
@@ -84,6 +85,14 @@ class NaiveScheduler:
         eligible_nodes = self._eligible_nodes(spec, nodes)
         if not eligible_nodes:
             r.rpush(_QUEUE_KEY, job_id)
+            # Persist the structured "why not placed" decision so the UI can
+            # surface it in the job's row expansion. Without this, the job
+            # just sits in QUEUED with no operator-visible reason.
+            try:
+                no_placement = self._build_no_placement_decision(spec, nodes)
+                set_placement_decision(job_id, no_placement)
+            except Exception:
+                logger.exception("Failed to persist no-placement decision for job %s", job_id)
             logger.info("No eligible nodes for job %s under policy %s", job_id, self.active_policy.value)
             return
 
@@ -189,6 +198,50 @@ class NaiveScheduler:
             decision["round_robin_pointer"] = rr_pointer
 
         return chosen.node_id, decision
+
+    def _build_no_placement_decision(
+        self,
+        spec: JobSpec,
+        all_nodes: List[NodeCandidate],
+    ) -> Dict[str, Any]:
+        """
+        Build a placement_decision blob for a tick that found no eligible nodes.
+        chosen_node_id is None and every candidate carries a rejection reason.
+        Highest-priority reason becomes chosen_reason so UI can show a one-liner.
+        """
+        partition = self._desired_partition(spec)
+        candidates_blob: List[Dict[str, Any]] = []
+        for node in sorted(all_nodes, key=lambda n: n.node_id):
+            candidates_blob.append(
+                {
+                    "node_id": node.node_id,
+                    "gpu_count": node.gpu_count,
+                    "available_gpu": node.allocatable_gpu_count,
+                    "avg_utilization": round(node.avg_utilization, 3),
+                    "partitions": list(node.partitions),
+                    "state": node.state,
+                    "eligible": False,
+                    "selected": False,
+                    "rejected_reason": self._rejection_reason(spec, node, partition),
+                }
+            )
+
+        if not candidates_blob:
+            chosen_reason = "no nodes are reporting heartbeats"
+        else:
+            # Surface the first node's rejection reason as the headline; if all
+            # candidates share the same blocker (e.g. drained), it's accurate.
+            chosen_reason = "no eligible nodes: " + candidates_blob[0]["rejected_reason"]
+
+        return {
+            "policy": self.active_policy.value,
+            "partition": partition,
+            "requested_gpus": spec.gpus,
+            "chosen_node_id": None,
+            "chosen_reason": chosen_reason,
+            "candidates": candidates_blob,
+            "decided_at": time.time(),
+        }
 
     def _rejection_reason(
         self,

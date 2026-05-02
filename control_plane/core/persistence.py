@@ -790,6 +790,35 @@ def place_job(job_id: str, node_id: str, decision: Optional[Dict[str, Any]] = No
                 raise KeyError(f"Job {job_id} not found")
 
 
+def set_placement_decision(job_id: str, decision: Dict[str, Any]) -> None:
+    """
+    Update the placement_decision JSON blob without changing status. Used by the
+    scheduler when a job stays QUEUED for a structural reason (no eligible nodes,
+    partition mismatch, etc.) so the UI can show *why* it isn't placed.
+    """
+    if not job_id:
+        raise ValueError("job_id is required")
+    decision_json = json.dumps(decision)
+    if _use_sqlite():
+        with _sqlite_conn() as conn:
+            cur = conn.execute(
+                "UPDATE jobs SET placement_decision=? WHERE job_id=?",
+                (decision_json, job_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"Job {job_id} not found")
+        return
+
+    with pg_conn() as conn:
+        with _cursor(conn) as cur:
+            cur.execute(
+                "UPDATE jobs SET placement_decision = %s::jsonb WHERE job_id = %s",
+                (decision_json, job_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"Job {job_id} not found")
+
+
 def store_backend_ref(job_id: str, backend_ref: str) -> None:
     if not job_id:
         raise ValueError("job_id is required")

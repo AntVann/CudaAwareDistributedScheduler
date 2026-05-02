@@ -66,7 +66,12 @@ export interface PlacementDecision {
   policy: string;
   partition: string | null;
   requested_gpus: number;
-  chosen_node_id: string;
+  /**
+   * The node selected for this job. `null` means the scheduler tried but
+   * found no eligible candidate — the job stayed QUEUED. Inspect
+   * `candidates[*].rejected_reason` to see why.
+   */
+  chosen_node_id: string | null;
   chosen_reason: string;
   candidates: PlacementCandidate[];
   decided_at: number;

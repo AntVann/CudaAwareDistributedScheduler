@@ -56,6 +56,48 @@ def test_tick_requeues_job_when_no_eligible_nodes(monkeypatch):
     assert place_calls == []
 
 
+def test_tick_persists_no_placement_decision_when_no_eligible_nodes(monkeypatch):
+    """When tick() pops a job and finds no eligible nodes, it should persist a
+    structured placement_decision so the UI can show *why* the job is stuck."""
+    fake_redis = FakeRedis()
+    decisions = []
+
+    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_job_spec",
+        lambda job_id: JobSpec(job_id=job_id, project="default", image="", cmd=["echo"], gpus=4),
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "set_placement_decision",
+        lambda job_id, decision: decisions.append((job_id, decision)),
+    )
+    monkeypatch.setattr(scheduler_module, "place_job", lambda *args, **kwargs: None)
+
+    # Both nodes are too small for the requested 4 GPUs.
+    SchedulerStub(
+        nodes=[
+            NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0),
+            NodeCandidate(node_id="node-b", gpu_count=2, avg_utilization=0.0),
+        ]
+    ).tick()
+
+    assert fake_redis.right_pushes == [("jobs:queue", "job-1")]
+    assert len(decisions) == 1
+    job_id, decision = decisions[0]
+    assert job_id == "job-1"
+    assert decision["chosen_node_id"] is None
+    assert "no eligible nodes" in decision["chosen_reason"]
+    assert len(decision["candidates"]) == 2
+    for cand in decision["candidates"]:
+        assert cand["eligible"] is False
+        assert cand["selected"] is False
+        assert "rejected_reason" in cand
+        assert "not enough GPUs" in cand["rejected_reason"]
+
+
 def test_tick_skips_jobs_already_cancelled_before_dispatch(monkeypatch):
     """If a job was cancelled while sitting in the queue, the scheduler must
     not dispatch it to the backend on its next tick."""

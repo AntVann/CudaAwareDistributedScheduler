@@ -494,8 +494,15 @@ export default function Jobs() {
 
                         {job.placement_decision && (
                           <div className="mt-4 rounded-md border border-border bg-surface-1 p-3">
-                            <div className="mb-2 text-xs font-medium text-text-secondary">
-                              Placement decision
+                            <div className="mb-2 flex items-center gap-2 text-xs font-medium">
+                              <span className="text-text-secondary">
+                                Placement decision
+                              </span>
+                              {job.placement_decision.chosen_node_id === null && (
+                                <span className="rounded border border-state-queued/40 bg-state-queued/10 px-2 py-0.5 text-[10px] text-state-queued">
+                                  STUCK · no eligible nodes
+                                </span>
+                              )}
                             </div>
                             <div className="mb-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
                               <div>
