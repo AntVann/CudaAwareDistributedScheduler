@@ -46,7 +46,7 @@ def test_tick_requeues_job_when_no_eligible_nodes(monkeypatch):
         lambda job_id: JobSpec(job_id=job_id, project="default", image="", cmd=["echo", "hi"], gpus=2),
     )
     place_calls = []
-    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id, decision=None: place_calls.append((job_id, node_id)))
 
     SchedulerStub(nodes=[NodeCandidate(node_id="node-a", gpu_count=1, avg_utilization=0.0)]).tick()
 
@@ -80,7 +80,7 @@ def test_tick_marks_job_failed_when_backend_submit_raises(monkeypatch):
         "set_job_state",
         lambda job_id, state, reason=None, exit_code=None: failed_calls.append((job_id, state, reason, exit_code)),
     )
-    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id, decision=None: place_calls.append((job_id, node_id)))
 
     scheduler.tick()
 
@@ -116,7 +116,7 @@ def test_tick_cancels_backend_job_when_place_job_raises(monkeypatch):
     monkeypatch.setattr(
         scheduler_module,
         "place_job",
-        lambda job_id, node_id: (_ for _ in ()).throw(RuntimeError("db write failed")),
+        lambda job_id, node_id, decision=None: (_ for _ in ()).throw(RuntimeError("db write failed")),
     )
     monkeypatch.setattr(
         scheduler_module,
@@ -174,7 +174,7 @@ def test_tick_filters_nodes_by_partition_and_state(monkeypatch):
         ),
     )
     place_calls = []
-    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id, decision=None: place_calls.append((job_id, node_id)))
 
     scheduler.tick()
 
@@ -200,7 +200,7 @@ def test_fifo_selects_first_eligible_node_in_sorted_order(monkeypatch):
         lambda job_id: JobSpec(job_id=job_id, project="default", image="", cmd=["echo", "hi"], gpus=2),
     )
     place_calls = []
-    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id: place_calls.append((job_id, node_id)))
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id, decision=None: place_calls.append((job_id, node_id)))
 
     scheduler.tick()
 
@@ -218,9 +218,9 @@ def test_round_robin_cycles_across_eligible_nodes():
         NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0),
     ]
 
-    first = scheduler._select_node(fake_redis, spec, nodes)
-    second = scheduler._select_node(fake_redis, spec, nodes)
-    third = scheduler._select_node(fake_redis, spec, nodes)
+    first, _ = scheduler._select_node(fake_redis, spec, nodes, nodes)
+    second, _ = scheduler._select_node(fake_redis, spec, nodes, nodes)
+    third, _ = scheduler._select_node(fake_redis, spec, nodes, nodes)
 
     assert (first, second, third) == ("node-a", "node-b", "node-a")
 
@@ -236,7 +236,7 @@ def test_binpack_uses_surplus_then_utilization_then_node_id():
         NodeCandidate(node_id="node-b", gpu_count=3, avg_utilization=40.0),
     ]
 
-    selected = scheduler._select_node(fake_redis, spec, nodes)
+    selected, _ = scheduler._select_node(fake_redis, spec, nodes, nodes)
 
     assert selected == "node-b"
 
