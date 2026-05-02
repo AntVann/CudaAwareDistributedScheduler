@@ -9,6 +9,7 @@ from control_plane.core.models import JobSpec, SchedulerPolicy
 from control_plane.core.persistence import (
     get_active_policy,
     get_job_spec,
+    get_job_status,
     place_job,
     redis_client,
     set_job_state,
@@ -64,6 +65,18 @@ class NaiveScheduler:
         r = redis_client()
         job_id = r.lpop(_QUEUE_KEY)
         if not job_id:
+            return
+
+        # Drop jobs that left the QUEUED state while waiting in line — most
+        # commonly because the operator cancelled them via /api/jobs/{id}/cancel.
+        # Without this guard, cancelled jobs would still be dispatched to SLURM.
+        current_status = get_job_status(job_id)
+        if current_status is not None and current_status.state.value != "QUEUED":
+            logger.info(
+                "Skipping job %s: state is %s (cancelled or otherwise terminal)",
+                job_id,
+                current_status.state.value,
+            )
             return
 
         spec = get_job_spec(job_id) or JobSpec(job_id=job_id, project="default", image="", cmd=[])

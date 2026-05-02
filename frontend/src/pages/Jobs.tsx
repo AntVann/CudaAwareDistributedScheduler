@@ -3,6 +3,7 @@ import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
 import { useOperatorAuth } from "../auth-context";
 import {
+  cancelJob,
   fetchJobLogs,
   fetchJobs,
   submitJob,
@@ -10,6 +11,8 @@ import {
   type JobListItem,
   type JobLogsResponse,
 } from "../api/client";
+
+const CANCELLABLE_STATES = new Set(["QUEUED", "PLACED", "RUNNING"]);
 
 function formatTs(ts: number | null | undefined): string {
   if (!ts) return "-";
@@ -207,6 +210,26 @@ export default function Jobs() {
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [autoRefresh, loadJobs]);
+
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+
+  const handleCancel = async (jobId: string) => {
+    if (!token) return;
+    if (!window.confirm(`Cancel job ${jobId}? This sends scancel to SLURM.`)) {
+      return;
+    }
+    setCancellingId(jobId);
+    setCancelError(null);
+    try {
+      await cancelJob(jobId, token);
+      void loadJobs();
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : "Cancel failed");
+    } finally {
+      setCancellingId(null);
+    }
+  };
 
   const handleSubmit = async () => {
     setSubmitting(true);
@@ -417,6 +440,29 @@ export default function Jobs() {
                   {expandedId === job.job_id && (
                     <tr className="border-b border-border bg-surface-2/30">
                       <td colSpan={8} className="px-6 py-4">
+                        {CANCELLABLE_STATES.has(job.state) && (
+                          <div className="mb-3 flex items-center gap-3">
+                            <button
+                              onClick={() => handleCancel(job.job_id)}
+                              disabled={!token || cancellingId === job.job_id}
+                              title={
+                                !token ? "Operator token required" : undefined
+                              }
+                              className="rounded-md border border-state-failed/40 bg-state-failed/10 px-3 py-1.5 text-xs font-medium text-state-failed hover:bg-state-failed/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            >
+                              {cancellingId === job.job_id
+                                ? "Cancelling..."
+                                : token
+                                  ? "Cancel job"
+                                  : "Cancel (token required)"}
+                            </button>
+                            {cancelError && cancellingId === null && (
+                              <span className="text-xs text-state-failed">
+                                {cancelError}
+                              </span>
+                            )}
+                          </div>
+                        )}
                         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
                           <div>
                             <span className="text-text-muted">GPU IDs:</span>{" "}

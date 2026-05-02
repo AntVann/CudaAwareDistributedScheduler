@@ -1,5 +1,5 @@
 from control_plane.core import scheduler as scheduler_module
-from control_plane.core.models import JobSpec, SchedulerPolicy
+from control_plane.core.models import JobSpec, JobState, JobStatus, SchedulerPolicy
 from control_plane.core.scheduler import NodeCandidate
 
 
@@ -40,6 +40,7 @@ class SchedulerStub(scheduler_module.NaiveScheduler):
 def test_tick_requeues_job_when_no_eligible_nodes(monkeypatch):
     fake_redis = FakeRedis()
     monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
     monkeypatch.setattr(
         scheduler_module,
         "get_job_spec",
@@ -53,6 +54,40 @@ def test_tick_requeues_job_when_no_eligible_nodes(monkeypatch):
     assert fake_redis.left_pushes == []
     assert fake_redis.right_pushes == [("jobs:queue", "job-1")]
     assert place_calls == []
+
+
+def test_tick_skips_jobs_already_cancelled_before_dispatch(monkeypatch):
+    """If a job was cancelled while sitting in the queue, the scheduler must
+    not dispatch it to the backend on its next tick."""
+    fake_redis = FakeRedis()
+    submit_calls = []
+    place_calls = []
+
+    class TrackingBackend:
+        def submit(self, spec, node_hint=None):
+            submit_calls.append((spec.job_id, node_hint))
+            return "ignored"
+
+    scheduler = SchedulerStub(nodes=[NodeCandidate(node_id="node-a", gpu_count=2, avg_utilization=0.0)])
+    scheduler.backend = TrackingBackend()
+
+    cancelled_status = JobStatus(state=JobState.CANCELLED, reason="cancelled by operator")
+
+    monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: cancelled_status)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_job_spec",
+        lambda job_id: JobSpec(job_id=job_id, project="default", image="", cmd=["echo"], gpus=1),
+    )
+    monkeypatch.setattr(scheduler_module, "place_job", lambda job_id, node_id, decision=None: place_calls.append((job_id, node_id)))
+
+    scheduler.tick()
+
+    # Job is dropped silently — no backend dispatch, no place_job, no requeue.
+    assert submit_calls == []
+    assert place_calls == []
+    assert fake_redis.right_pushes == []
 
 
 def test_tick_marks_job_failed_when_backend_submit_raises(monkeypatch):
@@ -70,6 +105,7 @@ def test_tick_marks_job_failed_when_backend_submit_raises(monkeypatch):
     scheduler.backend = ExplodingBackend()
 
     monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
     monkeypatch.setattr(
         scheduler_module,
         "get_job_spec",
@@ -108,6 +144,7 @@ def test_tick_cancels_backend_job_when_place_job_raises(monkeypatch):
     scheduler.backend = Backend()
 
     monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
     monkeypatch.setattr(
         scheduler_module,
         "get_job_spec",
@@ -161,6 +198,7 @@ def test_tick_filters_nodes_by_partition_and_state(monkeypatch):
     scheduler.set_active_policy(SchedulerPolicy.FIFO)
 
     monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
     monkeypatch.setattr(
         scheduler_module,
         "get_job_spec",
@@ -194,6 +232,7 @@ def test_fifo_selects_first_eligible_node_in_sorted_order(monkeypatch):
     scheduler.set_active_policy(SchedulerPolicy.FIFO)
 
     monkeypatch.setattr(scheduler_module, "redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler_module, "get_job_status", lambda job_id: None)
     monkeypatch.setattr(
         scheduler_module,
         "get_job_spec",

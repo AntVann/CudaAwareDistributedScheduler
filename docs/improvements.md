@@ -75,13 +75,18 @@ Files: `frontend/src/pages/Dashboard.tsx`.
 
 ## UX gaps
 
-### 7. No cancel button
+### 7. No cancel button — FIXED
 
-**Observed:** `CANCELLED` is in the documented lifecycle. The backend supports `scancel`. The Jobs UI has no way to cancel.
+**Observed:** `CANCELLED` was in the documented lifecycle and the backend supported `scancel`, but the Jobs UI had no way to cancel.
 
-**Why it matters:** Standard scheduler operation. Without it, the only cancel path is sshing in.
+**Fix:**
 
-**Where to look:** Add `DELETE /api/jobs/{id}` (or `POST /api/jobs/{id}/cancel`) that calls the backend's `cancel`. UI: a Cancel button in the row expansion, gated on `state ∈ {QUEUED, PLACED, RUNNING}` and on having an operator token.
+- API: `POST /api/jobs/{id}/cancel` (project-scoped via `require_user_or_admin`). Returns the updated `JobStatus`. Returns `409` if the job is already in a terminal state and `404` if the caller doesn't own the job's project.
+- Backend interaction: for PLACED/RUNNING jobs the endpoint calls `backend.cancel(job_id)` (which runs `scancel`); for QUEUED jobs the SLURM call is skipped (no `backend_ref` exists yet). In all cases the job is marked CANCELLED in our DB with a reason that flags whether the backend accepted the cancel.
+- Scheduler guard: `NaiveScheduler.tick()` now reads `get_job_status(job_id)` after popping from the queue and drops the job silently if it's no longer in QUEUED state. Without this, a job cancelled while waiting in line would still be dispatched to SLURM on the next tick. Covered by a new unit test (`test_tick_skips_jobs_already_cancelled_before_dispatch`).
+- Frontend: `cancelJob(jobId, token)` in `client.ts`, plus a Cancel button at the top of the Jobs row expansion that only appears for `state ∈ {QUEUED, PLACED, RUNNING}` and is disabled when no token is set. Confirms via `window.confirm` before firing.
+
+Files: `control_plane/api/jobs.py`, `control_plane/core/scheduler.py`, `frontend/src/api/client.ts`, `frontend/src/pages/Jobs.tsx`, `tests/unit/test_scheduler.py`.
 
 ---
 

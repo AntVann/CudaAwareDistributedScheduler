@@ -1,12 +1,19 @@
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from control_plane.api.auth import AuthPrincipal, require_user_or_admin
-from control_plane.core.models import JobSpec, JobStatus
-from control_plane.core.persistence import enqueue_job, get_job_project, get_job_status, job_summary, list_jobs
+from control_plane.core.models import JobSpec, JobState, JobStatus
+from control_plane.core.persistence import (
+    enqueue_job,
+    get_job_project,
+    get_job_status,
+    job_summary,
+    list_jobs,
+    set_job_state,
+)
 
 router = APIRouter(tags=["jobs"])
 logger = logging.getLogger("control_plane.api.jobs")
@@ -72,6 +79,62 @@ def read_job(
     if status is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return status
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=JobStatus)
+def cancel_job(
+    job_id: str,
+    request: Request,
+    principal: AuthPrincipal = Depends(require_user_or_admin),
+) -> JobStatus:
+    """
+    Cancel a job. Sends scancel to the backend if it has been dispatched
+    (PLACED/RUNNING) and marks the job as CANCELLED in our store. For jobs
+    still QUEUED, the scheduler will drop them on its next tick.
+    Returns the updated JobStatus.
+    """
+    status = get_job_status(job_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not principal.is_admin:
+        project = get_job_project(job_id)
+        if project is None or project not in principal.projects:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    cancellable = {JobState.QUEUED, JobState.PLACED, JobState.RUNNING}
+    if status.state not in cancellable:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job is in terminal state {status.state.value}; cannot cancel",
+        )
+
+    scheduler = getattr(request.app.state, "scheduler", None)
+    backend = getattr(scheduler, "backend", None)
+    backend_accepted: Optional[bool] = None
+    if status.state in {JobState.PLACED, JobState.RUNNING} and backend is not None:
+        try:
+            backend_accepted = bool(backend.cancel(job_id))
+        except Exception:
+            logger.exception("Backend cancel raised for job %s", job_id)
+            backend_accepted = False
+
+    reason = "cancelled by operator"
+    if backend_accepted is False:
+        reason = "cancelled by operator (backend rejected scancel)"
+
+    try:
+        set_job_state(job_id, JobState.CANCELLED.value, reason=reason)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Job not found") from None
+    except Exception as exc:
+        logger.exception("Failed to mark job %s as CANCELLED", job_id)
+        raise HTTPException(status_code=500, detail="Failed to cancel job") from exc
+
+    new_status = get_job_status(job_id)
+    if new_status is None:
+        raise HTTPException(status_code=500, detail="Job vanished after cancel")
+    return new_status
 
 
 @router.get("/jobs/{job_id}/logs")

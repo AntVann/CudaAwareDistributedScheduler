@@ -150,6 +150,21 @@ export const fetchJobLogs = (
     { token },
   );
 
+export interface CancelJobResponse {
+  state: string;
+  node_id: string | null;
+  gpu_ids: number[];
+  timestamps: Record<string, number | null>;
+  exit_code: number | null;
+  reason: string | null;
+}
+
+export const cancelJob = (jobId: string, token: string) =>
+  request<CancelJobResponse>(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST",
+    token,
+  });
+
 // Nodes
 export interface GpuInfo {
   index: number;
