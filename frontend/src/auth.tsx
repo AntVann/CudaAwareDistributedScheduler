@@ -4,11 +4,18 @@ import { OperatorAuthContext } from "./auth-context";
 
 const STORAGE_KEY = "operator_api_token";
 
+// HTTP header values must be Latin-1. Pasted tokens often pick up smart quotes,
+// NBSP, zero-width spaces, or em-dashes from docs/Slack — strip everything
+// outside printable ASCII so Headers.set() doesn't throw later.
+function sanitizeToken(raw: string): string {
+  return raw.replace(/[^\x21-\x7E]/g, "");
+}
+
 function loadStoredToken(): string {
   if (typeof window === "undefined") {
     return "";
   }
-  return window.sessionStorage.getItem(STORAGE_KEY) ?? "";
+  return sanitizeToken(window.sessionStorage.getItem(STORAGE_KEY) ?? "");
 }
 
 export function OperatorAuthProvider({ children }: { children: ReactNode }) {
@@ -18,11 +25,11 @@ export function OperatorAuthProvider({ children }: { children: ReactNode }) {
   const [loadingMe, setLoadingMe] = useState(false);
 
   const setToken = (nextToken: string) => {
-    const trimmed = nextToken.trim();
-    setTokenState(trimmed);
+    const cleaned = sanitizeToken(nextToken);
+    setTokenState(cleaned);
     if (typeof window !== "undefined") {
-      if (trimmed) {
-        window.sessionStorage.setItem(STORAGE_KEY, trimmed);
+      if (cleaned) {
+        window.sessionStorage.setItem(STORAGE_KEY, cleaned);
       } else {
         window.sessionStorage.removeItem(STORAGE_KEY);
       }

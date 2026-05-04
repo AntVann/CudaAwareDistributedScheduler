@@ -4,12 +4,10 @@ import Icon from "../components/Icon";
 import { useOperatorAuth } from "../auth-context";
 import {
   fetchHealth,
-  fetchJobs,
   fetchMetricsSummary,
   fetchPolicies,
   fetchReady,
   type HealthResponse,
-  type JobListItem,
   type MetricsSummary,
   type PoliciesResponse,
   type ReadyResponse,
@@ -52,19 +50,18 @@ function readyLabel(ready: ReadyResponse | null, field: "postgres" | "redis"): s
   return sub.mode === "memory" ? "Queue" : "Redis";
 }
 
-/** Heuristic verdict — counts attention items based on metrics + jobs. */
+/** Heuristic verdict — counts attention items from cheap dashboard summary data. */
 function buildVerdict(args: {
   health: HealthResponse | null;
   ready: ReadyResponse | null;
   metrics: MetricsSummary | null;
-  jobs: JobListItem[];
 }): {
   ok: boolean;
   issueCount: number;
   attention: AttentionItem[];
 } {
   const items: AttentionItem[] = [];
-  const { health, ready, metrics, jobs } = args;
+  const { health, ready, metrics } = args;
 
   if (health && !health.ok) {
     items.push({
@@ -85,25 +82,17 @@ function buildVerdict(args: {
     });
   }
 
-  // Stuck jobs: any QUEUED row with a placement_decision blob whose
-  // chosen_node_id is null is a job the scheduler couldn't place.
-  for (const job of jobs) {
-    if (
-      job.state === "QUEUED" &&
-      job.placement_decision &&
-      job.placement_decision.chosen_node_id === null
-    ) {
-      const why = job.placement_decision.chosen_reason ?? "no eligible nodes";
-      items.push({
-        tone: "warn",
-        icon: "clock",
-        title: "Job stuck in queue",
-        meta: job.job_id,
-        body: why,
-        action: "Inspect",
-        navigateTo: "/jobs",
-      });
-    }
+  // Keep the dashboard path shallow. Detailed placement diagnostics live on
+  // the Jobs page because fetching every placement_decision can be expensive.
+  if (metrics && metrics.jobs.queued > 0) {
+    items.push({
+      tone: "info",
+      icon: "clock",
+      title: `${metrics.jobs.queued} queued job${metrics.jobs.queued === 1 ? "" : "s"}`,
+      body: "Open Jobs for placement diagnostics and per-job scheduler decisions.",
+      action: "Inspect",
+      navigateTo: "/jobs",
+    });
   }
 
   // Stale nodes (metrics summary already aggregates, but only carry it as a
@@ -390,7 +379,6 @@ export default function Dashboard() {
   const [ready, setReady] = useState<ReadyResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
   const [policies, setPolicies] = useState<PoliciesResponse | null>(null);
-  const [jobs, setJobs] = useState<JobListItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [policyStatus, setPolicyStatus] = useState<string | null>(null);
   const [policyError, setPolicyError] = useState<string | null>(null);
@@ -409,12 +397,10 @@ export default function Dashboard() {
         ]);
         let metricsResponse: MetricsSummary | null = null;
         let policiesResponse: PoliciesResponse | null = null;
-        let jobsResponse: JobListItem[] = [];
         if (token) {
-          [metricsResponse, policiesResponse, jobsResponse] = await Promise.all([
-            fetchMetricsSummary(60, token),
+          [metricsResponse, policiesResponse] = await Promise.all([
+            fetchMetricsSummary(10080, token),
             fetchPolicies(token),
-            fetchJobs(token),
           ]);
         }
         if (!cancelled) {
@@ -422,7 +408,6 @@ export default function Dashboard() {
           setReady(readyResponse);
           setMetrics(metricsResponse);
           setPolicies(policiesResponse);
-          setJobs(jobsResponse);
           setLastUpdated(Date.now());
           setError(null);
           setLoading(false);
@@ -464,8 +449,8 @@ export default function Dashboard() {
   }
 
   const verdict = useMemo(
-    () => buildVerdict({ health, ready, metrics, jobs }),
-    [health, ready, metrics, jobs],
+    () => buildVerdict({ health, ready, metrics }),
+    [health, ready, metrics],
   );
 
   const queueDepth = metrics?.queue_depth ?? 0;
@@ -526,18 +511,18 @@ export default function Dashboard() {
         <KpiTile
           label="Placement p95"
           value={placementP95}
-          sub="ms · last 60m"
+          sub="ms · last 7d"
           accent={placementP95 > 1000 ? "var(--color-warn)" : undefined}
         />
         <KpiTile
           label="Run latency p50 / p95"
           value={`${runP50} / ${runP95}`}
-          sub="ms · last 60m"
+          sub="ms · last 7d"
         />
         <KpiTile
           label="Recent terminal"
           value={`${doneRecent} ✓ ${failedRecent} ✗`}
-          sub="done / failed · last 60m"
+          sub="done / failed · last 7d"
           accent={failedRecent > 0 ? "var(--color-danger)" : "var(--color-ok)"}
         />
       </div>
@@ -616,7 +601,7 @@ export default function Dashboard() {
             <div>
               <div className="card-title">Placement latency</div>
               <div className="text-xs muted mt-1">
-                Time from enqueue → placed, last 60 minutes
+                Time from enqueue → placed, last 7 days
               </div>
             </div>
             <div className="flex gap-3 text-xs muted">
@@ -710,7 +695,7 @@ export default function Dashboard() {
                 <div className="num font-semibold text-lg mt-1">{runP95}ms</div>
               </div>
               <div>
-                <div className="text-xs muted">Done · last 60m</div>
+                <div className="text-xs muted">Done · last 7d</div>
                 <div
                   className="num font-semibold text-lg mt-1"
                   style={{ color: "var(--color-ok)" }}
@@ -719,7 +704,7 @@ export default function Dashboard() {
                 </div>
               </div>
               <div>
-                <div className="text-xs muted">Failed · last 60m</div>
+                <div className="text-xs muted">Failed · last 7d</div>
                 <div
                   className="num font-semibold text-lg mt-1"
                   style={{

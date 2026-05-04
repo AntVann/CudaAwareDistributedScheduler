@@ -108,7 +108,7 @@ export default function Sidebar() {
             </div>
             <input
               className="input"
-              type="password"
+              type="text"
               placeholder="Paste bearer token"
               value={draftToken}
               onChange={(e) => setDraftToken(e.target.value)}
@@ -124,7 +124,15 @@ export default function Sidebar() {
                   setDraftToken("");
                 }
               }}
-              style={{ height: 28, fontSize: 12 }}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              data-1p-ignore="true"
+              data-lpignore="true"
+              data-bwignore="true"
+              data-form-type="other"
+              style={{ height: 28, fontSize: 12, fontFamily: "var(--font-mono)" }}
             />
             <div
               style={{
