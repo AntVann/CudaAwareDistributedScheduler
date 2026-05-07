@@ -35,6 +35,7 @@ services:
       SMTP_PASS: "${SMTP_PASS:-}"
       SMTP_FROM: "${SMTP_FROM:-ronakmalkan@gmail.com}"
       SMTP_STARTTLS: "${SMTP_STARTTLS:-true}"
+      TOKEN_DELIVERY_MODE: "${TOKEN_DELIVERY_MODE:-email}"
       TOKEN_REQUEST_RATE_LIMIT: "100"
       TOKEN_REQUEST_RATE_WINDOW_SECS: "600"
       POSTGRES_HOST: postgres
