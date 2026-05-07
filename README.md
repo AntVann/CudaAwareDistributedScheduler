@@ -213,6 +213,7 @@ make up
 ```
 
 This starts the control plane, two agent workers, Redis, and Postgres.
+The compose stack also mounts a shared log directory so job stdout/stderr can be viewed from the Jobs page.
 
 ### 2. Verify health
 
@@ -244,10 +245,17 @@ curl -X POST http://localhost:8000/api/jobs \
 ```
 
 Watch the job move through `QUEUED -> PLACED -> RUNNING -> DONE` in the Jobs page.
+Expand the job row and use the `stdout` / `stderr` log viewer buttons to inspect backend-managed output.
 
 ### 5. Change scheduler policy
 
 On the Dashboard page, switch between `FIFO`, `ROUND_ROBIN`, and `BINPACK`.
+
+### Local log behavior
+
+- Local Docker jobs write stdout/stderr to a shared container volume mounted at `JOB_LOG_DIR`.
+- The control plane exposes log tails through `GET /api/jobs/{job_id}/logs`.
+- The Jobs page uses that endpoint for the built-in log viewer.
 
 ### 6. Stop
 

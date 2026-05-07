@@ -61,13 +61,15 @@ def test_post_state_update_handles_request_exception(monkeypatch):
     assert sleep_calls == [0.1]
 
 
-def test_process_job_uses_fallback_spec_and_reports_failure_reason(monkeypatch):
+def test_process_job_uses_fallback_spec_and_reports_failure_reason(monkeypatch, tmp_path):
     state_calls = []
 
-    def fake_run_job(cmd, image, env):
+    def fake_run_job(cmd, image, env, stdout_path=None, stderr_path=None):
         assert cmd == ["echo", "job-1"]
         assert image is None
         assert env is None
+        assert stdout_path is not None
+        assert stderr_path is not None
         return ExecutionResult(
             exit_code=127,
             reason="Image execution requested but 'apptainer' is not installed or not in PATH",
@@ -80,6 +82,7 @@ def test_process_job_uses_fallback_spec_and_reports_failure_reason(monkeypatch):
     monkeypatch.setattr(worker, "r", FakeRedis(spec_raw=None))
     monkeypatch.setattr(worker, "run_job", fake_run_job)
     monkeypatch.setattr(worker, "_post_state_update", fake_post_state)
+    monkeypatch.setattr(worker, "JOB_LOG_DIR", tmp_path / "logs")
 
     worker.process_job("job-1")
 

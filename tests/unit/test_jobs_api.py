@@ -151,3 +151,44 @@ def test_cancel_terminal_state_returns_409(monkeypatch):
     with pytest.raises(HTTPException) as excinfo:
         jobs_api.cancel_job("j5", request, principal=_admin())
     assert excinfo.value.status_code == 409
+
+
+def test_read_job_logs_returns_backend_payload(monkeypatch):
+    monkeypatch.setattr(
+        jobs_api,
+        "get_job_status",
+        lambda job_id: JobStatus(state=JobState.DONE, project="default"),
+    )
+    monkeypatch.setattr(jobs_api, "get_job_project", lambda job_id: "default")
+
+    class LogsBackend:
+        def read_logs(self, job_id, stream="stderr", tail=200):
+            return {
+                "stream": stream,
+                "path": f"/shared/logs/{job_id}.err",
+                "exists": True,
+                "content": "hello\n",
+                "lines": 1,
+                "bytes_total": 6,
+                "truncated": False,
+            }
+
+    request = _request_with_backend(LogsBackend())
+    payload = jobs_api.read_job_logs("j6", request, stream="stderr", tail=200, principal=_admin())
+
+    assert payload["stream"] == "stderr"
+    assert payload["content"] == "hello\n"
+
+
+def test_read_job_logs_returns_501_without_backend_support(monkeypatch):
+    monkeypatch.setattr(
+        jobs_api,
+        "get_job_status",
+        lambda job_id: JobStatus(state=JobState.DONE, project="default"),
+    )
+    monkeypatch.setattr(jobs_api, "get_job_project", lambda job_id: "default")
+    request = _request_with_backend(SimpleNamespace())
+
+    with pytest.raises(HTTPException) as excinfo:
+        jobs_api.read_job_logs("j7", request, stream="stderr", tail=200, principal=_admin())
+    assert excinfo.value.status_code == 501

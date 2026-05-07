@@ -238,6 +238,53 @@ def test_job_lifecycle_reaches_done():
     assert "done" in status["timestamps"]
 
 
+def test_job_logs_endpoint_returns_local_backend_output():
+    _require_integration()
+
+    job_id = f"logs-it-{int(time.time())}"
+    enqueue = requests.post(
+        f"{API_BASE}/api/jobs",
+        json={
+            "job_id": job_id,
+            "project": "default",
+            "image": "",
+            "cmd": ["sh", "-c", "echo stdout-line; echo stderr-line >&2"],
+        },
+        headers=_auth_headers(ADMIN_TOKEN),
+        timeout=5,
+    )
+    assert enqueue.status_code == 201
+
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        response = requests.get(f"{API_BASE}/api/jobs/{job_id}", headers=_auth_headers(ADMIN_TOKEN), timeout=5)
+        assert response.status_code == 200
+        status = response.json()
+        if status["state"] in {"DONE", "FAILED"}:
+            break
+        time.sleep(0.2)
+
+    assert status["state"] == "DONE"
+
+    stdout_logs = requests.get(
+        f"{API_BASE}/api/jobs/{job_id}/logs",
+        params={"stream": "stdout", "tail": 50},
+        headers=_auth_headers(ADMIN_TOKEN),
+        timeout=5,
+    )
+    stderr_logs = requests.get(
+        f"{API_BASE}/api/jobs/{job_id}/logs",
+        params={"stream": "stderr", "tail": 50},
+        headers=_auth_headers(ADMIN_TOKEN),
+        timeout=5,
+    )
+
+    assert stdout_logs.status_code == 200
+    assert stderr_logs.status_code == 200
+    assert "stdout-line" in stdout_logs.json()["content"]
+    assert "stderr-line" in stderr_logs.json()["content"]
+
+
 def test_request_approve_updates_status_and_issues_token():
     _require_integration()
 
