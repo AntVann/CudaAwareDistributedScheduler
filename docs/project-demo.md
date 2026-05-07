@@ -1,133 +1,319 @@
 # Project Demo Runbook
 
-This is a concrete end-to-end demo flow for running the app on an SJSU-style SLURM cluster from a terminal.
+This is the current end-to-end demo flow for running `cudaScheduler` against the SJSU COE HPC SLURM cluster from a laptop.
 
-This document now includes two valid demo paths:
+The working cluster path is:
 
-1. operator/admin token demo
-2. response-mode user token demo for HPC environments where SMTP is unavailable
+1. SSH to `coe-hpc1.sjsu.edu`
+2. SSH from there to `coe-hpc3` / `g17`
+3. Run the control plane on `g17`
+4. Tunnel laptop `localhost:8088` to `coe-hpc3:8088`
+5. Run the React UI locally at `localhost:5173`
 
-Replace these placeholders before running commands:
+## Per-User Placeholders
 
-- `<your-id>`: your SJSU/HPC username
-- `<hpc-login-node>`: the SSH host you use to access the cluster
-- `<login-node>`: the hostname where you run the control plane
-- `<operator-token>`: bearer token used for operator API calls
-- `<agent-token>`: bearer token used by SLURM job callbacks
-- `<user-token>`: bearer token returned from admin approval when `TOKEN_DELIVERY_MODE=response`
+Replace these values before running commands:
 
-## Terminal layout
+- `<sjsu-id>`: your SJSU/HPC username, for example `018183828`
+- `<repo-url>`: the Git remote URL for this repository
+- `<operator-token>`: a random admin/operator bearer token
+- `<agent-token>`: a different random callback/agent bearer token
 
-Use 5 terminals. Two on the HPC (over SSH), three on your laptop. Keep them open for the whole demo — restart only the control plane (HPC #1) when you push code changes.
-
-| # | Where | Purpose | Command kept running |
-|---|-------|---------|----------------------|
-| 1 | HPC (`<hpc-login-node>`) | Control plane | `python3 -m uvicorn control_plane.app:app --host 0.0.0.0 --port 8088` |
-| 2 | HPC (`<hpc-login-node>`) | SLURM ops | ad-hoc: `squeue -u <your-id>`, `sacct -j ...`, `cat $SLURM_LOG_DIR/...` |
-| 3 | Laptop | SSH tunnel | `ssh -L 8088:<login-node>:8088 <your-id>@<hpc-login-node>` (leave it open, don't type other commands) |
-| 4 | Laptop | Vite dev server | `cd frontend && npm run dev` |
-| 5 | Laptop | Free terminal | ad-hoc: `curl`, `rsync` of code changes, `git`, etc. |
-
-Notes:
-
-- Terminal 1 owns the env vars (`OPERATOR_API_TOKEN`, etc.). After `Ctrl-C` in this terminal the env vars survive in the same shell — press ↑ + Enter to restart `uvicorn` with the same token.
-- When you change Python code locally, rsync the changed file from terminal 5 (laptop) to the HPC, then restart the control plane in terminal 1 with `Ctrl-C` + ↑ + Enter.
-- If terminal 5 is busy (e.g. you started a long-running curl), open a sixth ad-hoc one rather than tangling it.
-- Frontend changes are picked up by Vite hot-reload — no restart needed for terminal 4.
-
-## 1. SSH to the cluster
-
-From your local machine:
+Generate tokens once per user:
 
 ```bash
-ssh <your-id>@<hpc-login-node>
+openssl rand -hex 32
+openssl rand -hex 32
 ```
 
-## 2. Prepare the project on the login node
+Do not commit tokens. Store them in `~/.scheduler-env` on HPC and in a local `.env` file on your laptop.
 
-If the repo is not already on the cluster, copy it from your local machine:
+## Required Terminals
+
+You need three terminals for a normal demo.
+
+| #  | Where  | Purpose |
+|----|--------|---------|
+| T1 | HPC/g17 | Control plane (`uvicorn`) |
+| T3 | Laptop | SSH tunnel from laptop to `g17:8088` |
+| T4 | Laptop | Vite frontend (`localhost:5173`) |
+
+Two more are useful but optional.
+
+| #  | Where  | Purpose |
+|----|--------|---------|
+| T2 | HPC/g17 | `sinfo`, `squeue`, `sacct`, logs, SQLite inspection |
+| T5 | Laptop | `rsync`, `curl`, `git`, ad-hoc checks |
+
+## One-Time HPC Setup
+
+Run this per HPC account.
 
 ```bash
-rsync -avz \
-  --exclude='.venv' --exclude='node_modules' --exclude='.git' \
-  --exclude='__pycache__' --exclude='frontend/dist' --exclude='*.pyc' \
-  ~/Projects/CudaAwareDistributedScheduler <your-id>@<hpc-login-node>:~/
+ssh <sjsu-id>@coe-hpc1.sjsu.edu
+ssh coe-hpc3
 ```
 
-Then on the cluster:
+If the repository is not present on `g17`:
 
 ```bash
-module load python3/3.11.5
+cd ~
+git clone <repo-url> CudaAwareDistributedScheduler
 cd ~/CudaAwareDistributedScheduler
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
 ```
 
-## 3. Start the control plane
+Create the persistent token file:
 
-On the login node:
+```bash
+cat > ~/.scheduler-env <<'EOF'
+export OPERATOR_API_TOKEN=<operator-token>
+export AGENT_API_TOKEN=<agent-token>
+EOF
+chmod 600 ~/.scheduler-env
+```
+
+Create user-owned SLURM script/log directories:
+
+```bash
+mkdir -p ~/scheduler-scripts ~/scheduler-logs
+chmod 700 ~/scheduler-scripts ~/scheduler-logs
+```
+
+Create the Python 3.9 virtualenv on `g17`:
 
 ```bash
 cd ~/CudaAwareDistributedScheduler
-source .venv/bin/activate
+python3 -m venv .venv-g17
+source .venv-g17/bin/activate
+```
+
+If `g17` cannot reach PyPI, copy `wheelhouse-g17.tgz` from a machine that has it, then install offline:
+
+```bash
+tar xzf wheelhouse-g17.tgz
+python -m pip install --no-index --find-links ./wheelhouse-g17 -r requirements.txt
+python -m pip install --no-index --find-links ./wheelhouse-g17 eval_type_backport
+```
+
+If PyPI access works, this is enough:
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install eval_type_backport
+```
+
+## One-Time Laptop Setup
+
+Clone the repo on the laptop:
+
+```bash
+cd ~/Projects
+git clone <repo-url> CudaAwareDistributedScheduler
+cd ~/Projects/CudaAwareDistributedScheduler
+```
+
+Create local `.env` with the same tokens as the HPC `~/.scheduler-env`:
+
+```bash
+cat > .env <<'EOF'
+export OPERATOR_API_TOKEN=<operator-token>
+export AGENT_API_TOKEN=<agent-token>
+EOF
+chmod 600 .env
+```
+
+Install frontend dependencies:
+
+```bash
+cd ~/Projects/CudaAwareDistributedScheduler/frontend
+npm install
+```
+
+Use Node `20.19+` or `22.12+` for Vite. Older Node may warn even if the build still works.
+
+## T1 - HPC/g17 Control Plane
+
+```bash
+ssh <sjsu-id>@coe-hpc1.sjsu.edu
+ssh coe-hpc3
+
+cd ~/CudaAwareDistributedScheduler
+source .venv-g17/bin/activate
+source ~/.scheduler-env
+
+mkdir -p ~/scheduler-scripts ~/scheduler-logs
+chmod 700 ~/scheduler-scripts ~/scheduler-logs
 
 export BACKEND=slurm
-export DATABASE_URL="sqlite:////home/<your-id>/scheduler.db"
+export DATABASE_URL="sqlite:////home/<sjsu-id>/scheduler.db"
 export QUEUE_BACKEND=memory
 export AUTH_MODE=token
-export ADMIN_API_TOKEN="<operator-token>"
-export AGENT_API_TOKEN="<agent-token>"
-export CONTROL_PLANE_CALLBACK_URL="http://<login-node>:8000"
-export SLURM_DEFAULT_PARTITION="gpuqs"
+export ADMIN_API_TOKEN="$OPERATOR_API_TOKEN"
+export CONTROL_PLANE_CALLBACK_URL="http://g17:8088"
+export SLURM_DEFAULT_PARTITION=gpuqs
+export SLURM_SCRIPT_DIR="$HOME/scheduler-scripts"
+export SLURM_LOG_DIR="$HOME/scheduler-logs"
 export SLURM_POLL_INTERVAL_SECS=10
-export TOKEN_DELIVERY_MODE="response"
+export TOKEN_DELIVERY_MODE=response
 
-python3 -m uvicorn control_plane.app:app --host 0.0.0.0 --port 8000
+python -m uvicorn control_plane.app:app --host 0.0.0.0 --port 8088
 ```
 
-Expected output includes:
+Expected output:
 
 ```text
 INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000
+INFO:     Uvicorn running on http://0.0.0.0:8088
 ```
 
-## 4. Submit a demo job
+Leave this terminal running. If you stop `uvicorn` with `Ctrl-C`, the exported env vars stay in the same shell. If you open a new shell, source/export them again.
 
-Open a second terminal and SSH to the same cluster:
+## T2 - HPC/g17 Inspection
 
 ```bash
-ssh <your-id>@<hpc-login-node>
+ssh <sjsu-id>@coe-hpc1.sjsu.edu
+ssh coe-hpc3
 cd ~/CudaAwareDistributedScheduler
-source .venv/bin/activate
 ```
 
-### Option A: Submit directly with the bootstrap admin token
-
-Submit a job through the control plane:
+Useful commands:
 
 ```bash
-curl -X POST http://<login-node>:8000/api/jobs \
-  -H "Authorization: Bearer <operator-token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "job_id": "demo-001",
-    "project": "default",
-    "image": "",
-    "cmd": ["sh", "-c", "sleep 5; hostname"],
-    "gpus": 1,
-    "metadata": {"partition": "gpuqs"}
-  }'
+sinfo
+sinfo -p gpuqs -o "%P %a %D %T %N"
+squeue -u <sjsu-id>
+sacct -j <slurm_id> --format=JobIDRaw,State,ExitCode,Start,End,NodeList
+tail -f ~/scheduler-logs/<job_id>-*.err
+sqlite3 ~/scheduler.db "SELECT job_id, status FROM jobs ORDER BY rowid DESC LIMIT 10;"
 ```
 
-### Option B: Demo the token-request workflow first
+## T3 - Laptop SSH Tunnel
+
+```bash
+ssh -N -o ServerAliveInterval=30 \
+  -L 8088:coe-hpc3:8088 \
+  <sjsu-id>@coe-hpc1.sjsu.edu
+```
+
+This terminal has no prompt while the tunnel is active. Leave it open.
+
+Verify from T5:
+
+```bash
+curl -i http://localhost:8088/health
+```
+
+## T4 - Laptop Frontend
+
+```bash
+cd ~/Projects/CudaAwareDistributedScheduler/frontend
+npm run dev
+```
+
+Open:
+
+```text
+http://localhost:5173
+```
+
+Paste `<operator-token>` into the **API Token** box in the sidebar. The sidebar should show `bootstrap-admin`.
+
+## T5 - Laptop Ad Hoc
+
+```bash
+cd ~/Projects/CudaAwareDistributedScheduler
+source .env
+```
+
+Health check:
+
+```bash
+curl -i http://localhost:8088/health
+```
+
+Fast job summary:
+
+```bash
+curl -s -H "Authorization: Bearer $OPERATOR_API_TOKEN" \
+  http://localhost:8088/api/jobs/summary | python3 -m json.tool
+```
+
+Full jobs list:
+
+```bash
+curl -s -H "Authorization: Bearer $OPERATOR_API_TOKEN" \
+  http://localhost:8088/api/jobs | python3 -m json.tool
+```
+
+Prefer `/api/jobs/summary` for quick checks. `/api/jobs` can be slow because it may include full placement diagnostics.
+
+Rsync backend changes to HPC:
+
+```bash
+rsync -avz \
+  --exclude='.venv' --exclude='.venv-g17' --exclude='node_modules' --exclude='.git' \
+  --exclude='__pycache__' --exclude='frontend/dist' --exclude='*.pyc' \
+  ./control_plane ./agent \
+  <sjsu-id>@coe-hpc1.sjsu.edu:~/CudaAwareDistributedScheduler/
+```
+
+After rsync, restart T1 with `Ctrl-C` and rerun the `python -m uvicorn ...` command.
+
+## Submit Demo Jobs
+
+From the UI:
+
+1. Open `http://localhost:5173`
+2. Paste the operator token if the sidebar is not signed in
+3. Go to **Jobs**
+4. Click **Submit Job**
+5. Use this smoke-test command:
+
+```json
+["sh", "-c", "echo job=$SLURM_JOB_ID; hostname; nvidia-smi -L || true; sleep 5"]
+```
+
+Set:
+
+- Project: `default`
+- GPUs: `1`
+- Partition: `Auto-select` or `gpuqs`
+
+This is a lightweight SLURM/GPU-placement smoke test. It requests one GPU, prints node/GPU information, sleeps briefly, and exits.
+
+From T5 with curl:
+
+```bash
+JOB_ID="demo-$(date +%s)"
+
+curl -s -X POST http://localhost:8088/api/jobs \
+  -H "Authorization: Bearer $OPERATOR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"job_id\": \"$JOB_ID\",
+    \"project\": \"default\",
+    \"image\": \"\",
+    \"cmd\": [\"sh\", \"-c\", \"echo job=$JOB_ID; hostname; nvidia-smi -L || true; sleep 5\"],
+    \"gpus\": 1,
+    \"metadata\": {\"partition\": \"gpuqs\"}
+  }" | python3 -m json.tool
+```
+
+Verify:
+
+```bash
+curl -s -H "Authorization: Bearer $OPERATOR_API_TOKEN" \
+  http://localhost:8088/api/jobs/summary | python3 -m json.tool
+```
+
+## Token Request Demo
+
+Use this only if you want to demonstrate the token approval flow. `TOKEN_DELIVERY_MODE=response` returns the plaintext token in the admin approval response, which is useful on HPC when outbound SMTP is unavailable.
 
 Submit a public token request:
 
 ```bash
-curl -X POST http://<login-node>:8000/api/token-requests \
+curl -X POST http://localhost:8088/api/token-requests \
   -H "Content-Type: application/json" \
   -d '{
     "subject_name": "demo-user",
@@ -140,102 +326,66 @@ curl -X POST http://<login-node>:8000/api/token-requests \
 List pending requests as admin:
 
 ```bash
-curl -H "Authorization: Bearer <operator-token>" \
-  "http://<login-node>:8000/api/admin/token-requests?status=PENDING"
+curl -H "Authorization: Bearer $OPERATOR_API_TOKEN" \
+  "http://localhost:8088/api/admin/token-requests?status=PENDING"
 ```
 
-Approve a pending request and capture the returned token:
+Approve:
 
 ```bash
 REQ_ID="<request-id>"
 
 curl -X POST \
-  "http://<login-node>:8000/api/admin/token-requests/$REQ_ID/approve" \
-  -H "Authorization: Bearer <operator-token>" \
+  "http://localhost:8088/api/admin/token-requests/$REQ_ID/approve" \
+  -H "Authorization: Bearer $OPERATOR_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"review_notes":"approved during live demo"}'
 ```
 
-When `TOKEN_DELIVERY_MODE=response`, the approval response contains:
+Use the returned `plaintext_token` as a user token for project-scoped job submission.
 
-```json
-{
-  "plaintext_token": "<user-token>"
-}
-```
+## Coworker Setup
 
-Use that returned user token to submit the demo job:
+Each coworker uses their own SJSU id, home directory, database, script/log directories, and tokens.
+
+For coworker `018183899`, change:
 
 ```bash
-curl -X POST http://<login-node>:8000/api/jobs \
-  -H "Authorization: Bearer <user-token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "job_id": "demo-user-001",
-    "project": "default",
-    "image": "",
-    "cmd": ["sh", "-c", "sleep 5; hostname"],
-    "gpus": 1,
-    "metadata": {"partition": "gpuqs"}
-  }'
+ssh 018183899@coe-hpc1.sjsu.edu
+export DATABASE_URL="sqlite:////home/018183899/scheduler.db"
+export SLURM_SCRIPT_DIR="/home/018183899/scheduler-scripts"
+export SLURM_LOG_DIR="/home/018183899/scheduler-logs"
 ```
 
-## 5. Verify the job
-
-Check the control-plane view:
+Their tunnel also uses their username:
 
 ```bash
-curl -H "Authorization: Bearer <operator-token>" \
-  http://<login-node>:8000/api/jobs | python3 -m json.tool
+ssh -N -o ServerAliveInterval=30 \
+  -L 8088:coe-hpc3:8088 \
+  018183899@coe-hpc1.sjsu.edu
 ```
 
-Check the direct SLURM view:
+They must create their own `~/.scheduler-env` on HPC:
 
 ```bash
-squeue -u <your-id>
+cat > ~/.scheduler-env <<'EOF'
+export OPERATOR_API_TOKEN=<coworker-operator-token>
+export AGENT_API_TOKEN=<coworker-agent-token>
+EOF
+chmod 600 ~/.scheduler-env
 ```
 
-If you want to show a user-scoped read:
+They should also create their own local laptop `.env` with the same two tokens.
 
-```bash
-curl -H "Authorization: Bearer <user-token>" \
-  http://<login-node>:8000/api/jobs/demo-user-001 | python3 -m json.tool
-```
-
-## 6. View the dashboard from your laptop
-
-From your local machine, tunnel the control-plane port:
-
-```bash
-ssh -L 8000:<login-node>:8000 <your-id>@<hpc-login-node>
-```
-
-Then in a local terminal:
-
-```bash
-cd ~/Projects/CudaAwareDistributedScheduler/frontend
-npm install
-echo 'VITE_API_BASE=http://localhost:8000' > .env
-npm run dev
-```
-
-Open:
-
-- `http://localhost:5173`
-
-## 7. What to point out during the demo
-
-- Submit a job from the API or UI.
-- Optionally show the token request and approval flow before job submission.
-- Show the job appear in `/api/jobs`.
-- Show the corresponding SLURM job in `squeue`.
-- Show the state transition to `RUNNING` and then `DONE` or `FAILED`.
-- Show the Nodes and Metrics pages in the frontend.
+Do not share `scheduler.db`, `~/scheduler-scripts`, `~/scheduler-logs`, or bearer tokens between users.
 
 ## Notes
 
-- `CONTROL_PLANE_CALLBACK_URL` must be reachable from compute nodes. `127.0.0.1` is only valid if the callback runs on the same host namespace as the job.
-- If your cluster uses a different Python module name/version, replace `python3/3.11.5` with the correct one.
-- If your cluster uses different partitions, replace `gpuqs` with a valid partition name.
-- `TOKEN_DELIVERY_MODE=response` is recommended on HPC when outbound SMTP is blocked.
-- On clusters where `sacct` is disabled, lifecycle completion can still succeed through callback updates as long as `CONTROL_PLANE_CALLBACK_URL` is reachable from compute nodes.
+- Use `coe-hpc3` / `g17` for actual SLURM jobs. `coe-hpc1` is only the SSH entry point.
+- Do not use `.venv` on `g17`; use `.venv-g17`.
+- `ADMIN_API_TOKEN` should be set to `$OPERATOR_API_TOKEN` for bootstrap admin auth.
+- `OPERATOR_API_TOKEN` and `AGENT_API_TOKEN` must be different tokens.
+- `CONTROL_PLANE_CALLBACK_URL` must be reachable from SLURM jobs. For this cluster, use `http://g17:8088`.
+- `SLURM_SCRIPT_DIR` and `SLURM_LOG_DIR` should be under your home directory, not `/tmp`, to avoid permission issues.
+- If the dashboard shows zeros, confirm the sidebar is signed in as `bootstrap-admin`.
+- If the frontend warns about Node, upgrade to Node `20.19+` or `22.12+`.

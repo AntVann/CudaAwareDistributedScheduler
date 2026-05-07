@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import Card from "../components/Card";
+import Icon from "../components/Icon";
 import StatusBadge from "../components/StatusBadge";
 import { useOperatorAuth } from "../auth-context";
 import {
@@ -329,24 +330,32 @@ export default function Jobs() {
   };
 
   return (
-    <div className="max-w-6xl space-y-5">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Jobs</h2>
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-sm text-text-secondary cursor-pointer">
+    <div className="page fade-in">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Jobs</h1>
+          <div className="page-sub">
+            {autoRefresh ? "Auto-refreshing every 3s." : "Auto-refresh paused."}
+          </div>
+        </div>
+        <div className="page-actions">
+          <label className="toggle">
             <input
               type="checkbox"
               checked={autoRefresh}
               onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="accent-accent"
             />
+            <span className="track">
+              <span className="thumb" />
+            </span>
             Auto-refresh
           </label>
           <button
+            type="button"
             onClick={() => setShowSubmit(!showSubmit)}
-            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
+            className="btn btn-primary"
           >
-            Submit Job
+            + Submit Job
           </button>
         </div>
       </div>
@@ -502,63 +511,60 @@ export default function Jobs() {
         </div>
       )}
 
-      {/* Filter / search / sort bar — only shown when there are jobs to filter */}
+      {/* Filter / search / sort bar — only shown when there are jobs to filter.
+          Uses the design-system .chip and .input primitives so it picks up the
+          orange accent on selection and the active-filter tags pattern. */}
       {!loading && jobs.length > 0 && (
-        <Card>
-          <div className="flex flex-wrap items-center gap-3 text-xs">
-            <div className="flex flex-wrap items-center gap-1">
-              <span className="text-text-muted mr-1">State:</span>
+        <div className="card mb-4">
+          <div className="card-body" style={{ padding: "14px 18px" }}>
+            <div
+              className="flex items-center gap-3"
+              style={{ flexWrap: "wrap" }}
+            >
+              <div style={{ position: "relative", minWidth: 240, flex: "1 1 240px" }}>
+                <span
+                  style={{
+                    position: "absolute",
+                    left: 10,
+                    top: 8,
+                    color: "var(--color-text-3)",
+                    pointerEvents: "none",
+                  }}
+                >
+                  <Icon name="search" size={14} />
+                </span>
+                <input
+                  className="input mono"
+                  placeholder="Search by job_id…"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  style={{ paddingLeft: 32 }}
+                />
+              </div>
+              <div
+                style={{ width: 1, background: "var(--color-border)", height: 24 }}
+              />
+              <span className="text-xs muted font-medium">State</span>
               {ALL_STATES.map((s) => (
                 <button
                   key={s}
                   type="button"
                   onClick={() => toggleStateFilter(s)}
-                  className={`rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
-                    stateFilter.has(s)
-                      ? "border-accent bg-accent/10 text-accent"
-                      : "border-border bg-surface-0 text-text-muted hover:text-text-secondary"
-                  }`}
+                  className={"chip" + (stateFilter.has(s) ? " active" : "")}
                 >
                   {s}
                 </button>
               ))}
-              <button
-                type="button"
-                onClick={() => setStateFilter(new Set(ALL_STATES))}
-                className="ml-1 text-[11px] text-text-muted hover:text-text-secondary underline-offset-2 hover:underline"
-              >
-                all
-              </button>
-              <button
-                type="button"
-                onClick={() => setStateFilter(new Set())}
-                className="text-[11px] text-text-muted hover:text-text-secondary underline-offset-2 hover:underline"
-              >
-                none
-              </button>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-text-muted">Search:</span>
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="job_id substring"
-                className="rounded-md border border-border bg-surface-0 px-2 py-1 text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+              <div
+                style={{ width: 1, background: "var(--color-border)", height: 24 }}
               />
-            </div>
-            <div className="flex flex-wrap items-center gap-1">
-              <span className="text-text-muted mr-1">Window:</span>
+              <span className="text-xs muted font-medium">Window</span>
               {TIME_WINDOWS.map((w) => (
                 <button
                   key={w.label}
                   type="button"
                   onClick={() => setWindowHours(w.value)}
-                  className={`rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
-                    windowHours === w.value
-                      ? "border-accent bg-accent/10 text-accent"
-                      : "border-border bg-surface-0 text-text-muted hover:text-text-secondary"
-                  }`}
+                  className={"chip" + (windowHours === w.value ? " active" : "")}
                   title={
                     w.value === null
                       ? "Show all jobs regardless of age"
@@ -568,17 +574,65 @@ export default function Jobs() {
                   {w.label}
                 </button>
               ))}
+              <div className="grow" />
+              <button
+                type="button"
+                onClick={() => setSortDir((d) => (d === "newest" ? "oldest" : "newest"))}
+                className="btn btn-ghost btn-sm"
+                title="Toggle sort direction"
+              >
+                Enqueued {sortDir === "newest" ? "↓ newest" : "↑ oldest"}
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => setSortDir((d) => (d === "newest" ? "oldest" : "newest"))}
-              className="rounded-md border border-border bg-surface-0 px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary"
-              title="Toggle sort direction"
-            >
-              Enqueued {sortDir === "newest" ? "↓ newest" : "↑ oldest"}
-            </button>
+
+            {/* Active-filter row — only renders when a filter is actually
+                applied. Each tag is removable and there's a clear-all link. */}
+            {(stateFilter.size < ALL_STATES.length || searchQuery.trim()) && (
+              <div
+                className="flex items-center gap-2 mt-3"
+                style={{ flexWrap: "wrap" }}
+              >
+                <span className="text-xs muted">Active filters:</span>
+                {ALL_STATES.filter((s) => !stateFilter.has(s)).length > 0 &&
+                  ALL_STATES.filter((s) => stateFilter.has(s)).map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => toggleStateFilter(s)}
+                      className="chip active"
+                    >
+                      {s}
+                      <span className="chip-x">
+                        <Icon name="x" size={11} />
+                      </span>
+                    </button>
+                  ))}
+                {searchQuery.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery("")}
+                    className="chip active"
+                  >
+                    “{searchQuery.trim()}”
+                    <span className="chip-x">
+                      <Icon name="x" size={11} />
+                    </span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => {
+                    setStateFilter(new Set(ALL_STATES));
+                    setSearchQuery("");
+                  }}
+                >
+                  Clear all
+                </button>
+              </div>
+            )}
           </div>
-        </Card>
+        </div>
       )}
 
       {/* Jobs table */}
@@ -623,21 +677,21 @@ export default function Jobs() {
         }
         return (
           <div className="space-y-2">
-            <p className="text-xs text-text-muted">
+            <p className="text-xs muted">
               Showing {sorted.length} of {jobs.length}
               {sorted.length !== jobs.length ? " (filtered)" : ""}.
             </p>
-            <div className="overflow-x-auto rounded-lg border border-border">
-              <table className="w-full text-sm">
+            <div className="card" style={{ overflow: "hidden" }}>
+              <table className="t-table">
                 <thead>
-                  <tr className="border-b border-border bg-surface-1 text-left text-xs text-text-muted">
-                    <th className="px-4 py-2.5 font-medium">Job ID</th>
-                    <th className="px-4 py-2.5 font-medium">SLURM ID</th>
-                    <th className="px-4 py-2.5 font-medium">State</th>
-                    <th className="px-4 py-2.5 font-medium">Project</th>
-                    <th className="px-4 py-2.5 font-medium">Node</th>
-                    <th className="px-4 py-2.5 font-medium">Exit Code</th>
-                    <th className="px-4 py-2.5 font-medium">Reason</th>
+                  <tr>
+                    <th>Job ID</th>
+                    <th>SLURM ID</th>
+                    <th>State</th>
+                    <th>Project</th>
+                    <th>Node</th>
+                    <th>Exit Code</th>
+                    <th>Reason</th>
                     <th className="px-4 py-2.5 font-medium">Enqueued</th>
                   </tr>
                 </thead>

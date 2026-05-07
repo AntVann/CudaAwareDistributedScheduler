@@ -1,15 +1,20 @@
 import type { ReactNode } from "react";
 
+/**
+ * Card primitive matching the design system in index.css.
+ * - default: padded card body (.card + .card-pad)
+ * - pass `bare` to skip padding when the caller manages internal sections
+ *   themselves (.card-head, .card-body, .card-foot).
+ */
 export default function Card({
   children,
   className = "",
+  bare = false,
 }: {
   children: ReactNode;
   className?: string;
+  bare?: boolean;
 }) {
-  return (
-    <div className={`rounded-lg border border-border bg-surface-1 p-5 ${className}`}>
-      {children}
-    </div>
-  );
+  const cls = ["card", bare ? "" : "card-pad", className].filter(Boolean).join(" ");
+  return <div className={cls}>{children}</div>;
 }
