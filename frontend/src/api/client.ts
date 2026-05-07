@@ -265,6 +265,14 @@ export interface TokenInfo {
   created_by: string | null;
 }
 
+export interface ApproveTokenRequestResponse {
+  request_id: string;
+  status: string;
+  token_id: string;
+  expires_at: string;
+  plaintext_token?: string;
+}
+
 export const submitTokenRequest = (payload: TokenRequestPayload) =>
   request<{ request_id: string; status: string }>("/api/token-requests", {
     method: "POST",
@@ -278,7 +286,7 @@ export const fetchTokenRequests = (token: string, status = "PENDING") =>
   });
 
 export const approveTokenRequest = (requestId: string, token: string, reviewNotes = "") =>
-  request<{ request_id: string; status: string; token_id: string; expires_at: string }>(
+  request<ApproveTokenRequestResponse>(
     `/api/admin/token-requests/${requestId}/approve`,
     {
       method: "POST",

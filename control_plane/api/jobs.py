@@ -159,8 +159,8 @@ def read_job_logs(
     principal: AuthPrincipal = Depends(require_user_or_admin),
 ) -> Dict[str, Any]:
     """
-    Return the tail of the SLURM stdout/stderr file for a job.
-    Requires a backend that exposes `read_logs(job_id, stream, tail)` (currently SLURM).
+    Return the tail of the backend-managed stdout/stderr file for a job.
+    Requires a backend that exposes `read_logs(job_id, stream, tail)`.
     Project-scoped: callers must own (or admin) the job's project.
     """
     if get_job_status(job_id) is None:

@@ -19,6 +19,12 @@ export default function AdminTokenRequests() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [issuedToken, setIssuedToken] = useState<{
+    requestId: string;
+    token: string;
+    expiresAt: string;
+  } | null>(null);
+  const [copyMessage, setCopyMessage] = useState<string | null>(null);
 
   async function load() {
     if (!token) {
@@ -59,9 +65,21 @@ export default function AdminTokenRequests() {
 
   async function onApprove(requestId: string) {
     setMessage(null);
+    setError(null);
+    setCopyMessage(null);
     try {
       const response = await approveTokenRequest(requestId, token);
-      setMessage(`Approved request ${response.request_id}. Token emailed to requester.`);
+      if (response.plaintext_token) {
+        setIssuedToken({
+          requestId: response.request_id,
+          token: response.plaintext_token,
+          expiresAt: response.expires_at,
+        });
+        setMessage(`Approved request ${response.request_id}. Token returned below because response delivery mode is enabled.`);
+      } else {
+        setIssuedToken(null);
+        setMessage(`Approved request ${response.request_id}. Token emailed to requester.`);
+      }
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to approve request");
@@ -70,6 +88,7 @@ export default function AdminTokenRequests() {
 
   async function onReject(requestId: string) {
     setMessage(null);
+    setError(null);
     try {
       const response = await rejectTokenRequest(requestId, token, "Rejected by admin.");
       setMessage(`Rejected request ${response.request_id}.`);
@@ -81,12 +100,23 @@ export default function AdminTokenRequests() {
 
   async function onRevoke(tokenId: string) {
     setMessage(null);
+    setError(null);
     try {
       await revokeToken(tokenId, token, "Revoked by admin");
       setMessage(`Revoked token ${tokenId}.`);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to revoke token");
+    }
+  }
+
+  async function onCopyIssuedToken() {
+    if (!issuedToken) return;
+    try {
+      await navigator.clipboard.writeText(issuedToken.token);
+      setCopyMessage("Token copied to clipboard.");
+    } catch {
+      setCopyMessage("Copy failed. Select and copy the token manually.");
     }
   }
 
@@ -102,6 +132,47 @@ export default function AdminTokenRequests() {
         <div className="rounded-md border border-state-done/30 bg-state-done/10 px-4 py-3 text-sm text-state-done">
           {message}
         </div>
+      ) : null}
+      {issuedToken ? (
+        <Card>
+          <div className="space-y-3">
+            <div>
+              <h3 className="text-sm font-medium text-text-secondary">Issued Plaintext Token</h3>
+              <p className="mt-1 text-xs text-text-muted">
+                This token is only shown once in response delivery mode. Copy it now and give it to the requester securely.
+              </p>
+            </div>
+            <div className="rounded-md border border-border bg-surface-0 p-3">
+              <div className="mb-2 text-[11px] uppercase tracking-wide text-text-muted">
+                Request {issuedToken.requestId}
+              </div>
+              <div className="break-all font-mono text-sm text-text-primary">{issuedToken.token}</div>
+              <div className="mt-2 text-xs text-text-muted">
+                Expires: {new Date(issuedToken.expiresAt).toLocaleString()}
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={onCopyIssuedToken}
+                className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white"
+              >
+                Copy token
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIssuedToken(null);
+                  setCopyMessage(null);
+                }}
+                className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-text-secondary"
+              >
+                Dismiss
+              </button>
+              {copyMessage ? <span className="text-xs text-text-muted">{copyMessage}</span> : null}
+            </div>
+          </div>
+        </Card>
       ) : null}
 
       <Card>

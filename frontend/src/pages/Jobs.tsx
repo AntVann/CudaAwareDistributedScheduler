@@ -59,7 +59,7 @@ function JobLogsPanel({
   if (!hasBackendRef) {
     return (
       <div className="mt-4 rounded-md border border-border bg-surface-1 p-3 text-xs text-text-muted">
-        No SLURM job ID yet — logs are available once the job is dispatched to SLURM.
+        No backend job reference yet — logs are available once the job is dispatched.
       </div>
     );
   }

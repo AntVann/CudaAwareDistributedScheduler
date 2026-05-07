@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 import redis
@@ -17,6 +18,7 @@ CONTROL_URL = os.getenv("CONTROL_URL", os.getenv("CONTROL_PLANE_API", "http://co
 NODE_ID = os.getenv("NODE_ID", "node")
 ASSIGN_Q = f"assign:{NODE_ID}"
 AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "").strip()
+JOB_LOG_DIR = Path(os.getenv("JOB_LOG_DIR", "/var/lib/overlay/logs")).expanduser()
 
 r = redis.Redis(
     host=os.getenv("REDIS_HOST", "redis"),
@@ -85,11 +87,27 @@ def _load_job_spec(job_id: str) -> dict[str, Any]:
     return json.loads(spec_raw) if spec_raw else {"cmd": ["echo", job_id]}
 
 
+def _log_paths(job_id: str) -> tuple[str, str]:
+    JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    safe_job_id = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in job_id)
+    return (
+        str(JOB_LOG_DIR / f"{safe_job_id}.out"),
+        str(JOB_LOG_DIR / f"{safe_job_id}.err"),
+    )
+
+
 def process_job(job_id: str) -> None:
     spec = _load_job_spec(job_id)
     _post_state_update(job_id, "RUNNING")
+    stdout_path, stderr_path = _log_paths(job_id)
 
-    result = run_job(spec.get("cmd", []), spec.get("image"), spec.get("env"))
+    result = run_job(
+        spec.get("cmd", []),
+        spec.get("image"),
+        spec.get("env"),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
     new_state = "DONE" if result.exit_code == 0 else "FAILED"
     _post_state_update(
         job_id,
